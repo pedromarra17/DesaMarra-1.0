@@ -19,7 +19,6 @@ header, [data-testid="stToolbar"], [data-testid="stDecoration"], .stDeployButton
 /* badge "Hosted with Streamlit" (várias formas) */
 div[class^="viewerBadge"], div[class*="viewerBadge"] {display: none !important;}
 [data-testid="stAppViewContainer"] a[href*="streamlit.io"] {display: none !important;}
-/* fallback extra: qualquer âncora fixa no canto inferior direito com "streamlit" */
 a[href*="streamlit.io"][style*="position: fixed"], a[href*="streamlit.app"][style*="position: fixed"] {display: none !important;}
 </style>
 """, unsafe_allow_html=True)
@@ -29,12 +28,10 @@ BASE_DIR = Path(__file__).parent
 LOGO_LIGHT = BASE_DIR / "logo_light.png"   # para fundo claro
 LOGO_DARK  = BASE_DIR / "logo_dark.png"    # para fundo escuro
 
-def show_logo_center(width_px=440):
-    # Detecta tema atual (padrão: "light")
+def show_logo_center(width_px=460):
     theme_base = st.get_option("theme.base") or "light"
     logo_path = LOGO_LIGHT if theme_base == "light" else LOGO_DARK
     if not logo_path.exists():
-        # fallback: se não existir a logo do tema, tenta a outra
         logo_path = LOGO_DARK if theme_base == "light" else LOGO_LIGHT
     if logo_path.exists():
         b64 = base64.b64encode(logo_path.read_bytes()).decode()
@@ -48,10 +45,10 @@ def show_logo_center(width_px=440):
             unsafe_allow_html=True
         )
 
-show_logo_center(460)  # ajuste o tamanho da logo aqui
+show_logo_center(480)  # ajuste o tamanho da logo aqui
 
 st.markdown(
-    "<h1 style='text-align:center;margin:0.4rem 0 0 0;'>Separador de Etiquetas (4 → 1)</h1>",
+    "<h1 style='text-align:center;margin:0.4rem 0 0 0;'>Separador de Etiquetas (4 -> 1)</h1>",
     unsafe_allow_html=True
 )
 st.markdown(
@@ -62,6 +59,34 @@ st.markdown(
 )
 
 st.divider()
+
+# ================== ESTILO DO UPLOADER (500px + VERDE) ==================
+st.markdown("""
+<style>
+/* rótulo acima do uploader */
+div[data-testid="stFileUploader"] > label {
+    font-weight: 600;
+}
+/* dropzone do uploader */
+div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]{
+    width: 500px !important;          /* largura fixa */
+    max-width: 100%;
+    margin: 0 auto !important;        /* centraliza */
+    border-radius: 12px;
+    background-color: #16A34A !important;  /* verde */
+    border: 2px dashed rgba(255,255,255,0.6);
+    padding: 1.25rem;
+}
+/* cor do texto/ícones internos */
+div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"] *{
+    color: #FFFFFF !important;
+}
+/* hover */
+div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:hover{
+    background-color: #15803D !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ================== UPLOADER (APENAS 1) ==================
 uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")

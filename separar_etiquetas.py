@@ -145,7 +145,7 @@ else:
     <style>
     .info-centered [data-testid="stAlert"]{
         width: 500px !important;
-        max-width: 100% !important;
+        
         margin: 0 auto !important;   /* centraliza */
         border-radius: 12px;
     }

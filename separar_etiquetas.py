@@ -9,25 +9,37 @@ import io
 st.set_page_config(page_title="Separador de Etiquetas", layout="wide")
 
 # ====== HEADER CENTRALIZADO ======
+from pathlib import Path
+import base64
+import streamlit as st
+
 LOGO_PATH = Path(__file__).with_name("logo.png")
 
-c1, c2, c3 = st.columns([1, 3, 1])
-with c2:
+def show_logo_center(width_px=380):  # aumente aqui (ex.: 420, 460)
     if LOGO_PATH.exists():
-        # Ajuste o tamanho conforme desejar
-        st.image(str(LOGO_PATH), width=500)
-    st.markdown(
-        "<h1 style='text-align:center; margin:0;'>Separador de Etiquetas (4 > 1)</h1>",
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        "<p style='text-align:center; margin-top:0.25rem;'>"
-        "Envie seu PDF com 4 etiquetas por página e baixe o resultado pronto para impressão."
-        "</p>",
-        unsafe_allow_html=True
-    )
+        b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+        st.markdown(
+            f"""
+            <div style="text-align:center;">
+              <img src="data:image/png;base64,{b64}"
+                   style="display:block;margin:0 auto;width:{width_px}px;" />
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
-st.divider()
+show_logo_center(420)  # <- tamanho da logo (ajuste à vontade)
+
+st.markdown(
+    "<h1 style='text-align:center;margin:0.4rem 0 0 0;'>Separador de Etiquetas (4 → 1)</h1>",
+    unsafe_allow_html=True
+)
+st.markdown(
+    "<p style='text-align:center;margin-top:0.25rem;'>"
+    "Envie seu PDF com 4 etiquetas por página e baixe o resultado pronto para impressão."
+    "</p>",
+    unsafe_allow_html=True
+)
 
 # ====== UPLOADER ======
 uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")

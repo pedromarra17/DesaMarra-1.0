@@ -9,27 +9,35 @@ import io
 # ================== CONFIG DA PÁGINA ==================
 st.set_page_config(page_title="Separador de Etiquetas", layout="wide")
 
-# ---- (opcional) esconder branding/menus do Streamlit ----
+# ---- esconder branding/menus/badge do Streamlit (não-oficial) ----
 st.markdown("""
 <style>
-/* esconde menu (Theme/Settings/Help) */
-#MainMenu {visibility: hidden;}
-/* esconde rodapé "Made with Streamlit" */
-footer {visibility: hidden;}
-/* esconde header/toolbar (deploy, running, etc.) */
-header {visibility: hidden;}
-[data-testid="stToolbar"] {display: none;}
-[data-testid="stDecoration"] {display: none;}
-.stDeployButton {display: none;}
+/* menu e rodapé */
+#MainMenu, footer {visibility: hidden;}
+/* toolbar/topbar */
+header, [data-testid="stToolbar"], [data-testid="stDecoration"], .stDeployButton {display: none !important;}
+/* badge "Hosted with Streamlit" (várias formas) */
+div[class^="viewerBadge"], div[class*="viewerBadge"] {display: none !important;}
+[data-testid="stAppViewContainer"] a[href*="streamlit.io"] {display: none !important;}
+/* fallback extra: qualquer âncora fixa no canto inferior direito com "streamlit" */
+a[href*="streamlit.io"][style*="position: fixed"], a[href*="streamlit.app"][style*="position: fixed"] {display: none !important;}
 </style>
 """, unsafe_allow_html=True)
 
-# ================== HEADER (LOGO + TÍTULO) ==================
-LOGO_PATH = Path(__file__).with_name("logo.png")
+# ================== HEADER: logo conforme tema ==================
+BASE_DIR = Path(__file__).parent
+LOGO_LIGHT = BASE_DIR / "logo_light.png"   # para fundo claro
+LOGO_DARK  = BASE_DIR / "logo_dark.png"    # para fundo escuro
 
-def show_logo_center(width_px=420):  # ajuste o tamanho da logo aqui
-    if LOGO_PATH.exists():
-        b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+def show_logo_center(width_px=440):
+    # Detecta tema atual (padrão: "light")
+    theme_base = st.get_option("theme.base") or "light"
+    logo_path = LOGO_LIGHT if theme_base == "light" else LOGO_DARK
+    if not logo_path.exists():
+        # fallback: se não existir a logo do tema, tenta a outra
+        logo_path = LOGO_DARK if theme_base == "light" else LOGO_LIGHT
+    if logo_path.exists():
+        b64 = base64.b64encode(logo_path.read_bytes()).decode()
         st.markdown(
             f"""
             <div style="text-align:center;">
@@ -40,7 +48,7 @@ def show_logo_center(width_px=420):  # ajuste o tamanho da logo aqui
             unsafe_allow_html=True
         )
 
-show_logo_center(440)  # ← mude o valor se quiser maior/menor
+show_logo_center(460)  # ajuste o tamanho da logo aqui
 
 st.markdown(
     "<h1 style='text-align:center;margin:0.4rem 0 0 0;'>Separador de Etiquetas (4 → 1)</h1>",
@@ -84,7 +92,7 @@ def split_pdf_into_labels(file_like) -> bytes:
             writer.add_page(p)
 
     out = io.BytesIO()
-    writer.write(out)  # não quebre esta linha
+    writer.write(out)
     out.seek(0)
     return out.getvalue()
 

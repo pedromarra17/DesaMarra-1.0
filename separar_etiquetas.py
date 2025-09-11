@@ -3,19 +3,31 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import RectangleObject
 from copy import deepcopy
 from pathlib import Path
+import base64
 import io
 
-# Configuração da página
+# ================== CONFIG DA PÁGINA ==================
 st.set_page_config(page_title="Separador de Etiquetas", layout="wide")
 
-# ====== HEADER CENTRALIZADO ======
-from pathlib import Path
-import base64
-import streamlit as st
+# ---- (opcional) esconder branding/menus do Streamlit ----
+st.markdown("""
+<style>
+/* esconde menu (Theme/Settings/Help) */
+#MainMenu {visibility: hidden;}
+/* esconde rodapé "Made with Streamlit" */
+footer {visibility: hidden;}
+/* esconde header/toolbar (deploy, running, etc.) */
+header {visibility: hidden;}
+[data-testid="stToolbar"] {display: none;}
+[data-testid="stDecoration"] {display: none;}
+.stDeployButton {display: none;}
+</style>
+""", unsafe_allow_html=True)
 
+# ================== HEADER (LOGO + TÍTULO) ==================
 LOGO_PATH = Path(__file__).with_name("logo.png")
 
-def show_logo_center(width_px=380):  # aumente aqui (ex.: 420, 460)
+def show_logo_center(width_px=420):  # ajuste o tamanho da logo aqui
     if LOGO_PATH.exists():
         b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
         st.markdown(
@@ -28,7 +40,7 @@ def show_logo_center(width_px=380):  # aumente aqui (ex.: 420, 460)
             unsafe_allow_html=True
         )
 
-show_logo_center(420)  # <- tamanho da logo (ajuste à vontade)
+show_logo_center(440)  # ← mude o valor se quiser maior/menor
 
 st.markdown(
     "<h1 style='text-align:center;margin:0.4rem 0 0 0;'>Separador de Etiquetas (4 → 1)</h1>",
@@ -41,10 +53,12 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ====== UPLOADER ======
+st.divider()
+
+# ================== UPLOADER (APENAS 1) ==================
 uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")
 
-# ====== FUNÇÃO ======
+# ================== FUNÇÃO PRINCIPAL ==================
 def split_pdf_into_labels(file_like) -> bytes:
     reader = PdfReader(file_like)
     writer = PdfWriter()
@@ -54,7 +68,7 @@ def split_pdf_into_labels(file_like) -> bytes:
         left, bottom, right, top = float(mb.left), float(mb.bottom), float(mb.right), float(mb.top)
         width, height = right - left, top - bottom
 
-        # 4 quadrantes (2x2)
+        # 4 quadrantes (2x2): topo-esq, topo-dir, baixo-esq, baixo-dir
         quads = [
             (left, bottom + height/2, left + width/2, top),
             (left + width/2, bottom + height/2, right, top),
@@ -70,11 +84,11 @@ def split_pdf_into_labels(file_like) -> bytes:
             writer.add_page(p)
 
     out = io.BytesIO()
-    writer.write(out)       # <<< não pode quebrar essa linha!
+    writer.write(out)  # não quebre esta linha
     out.seek(0)
     return out.getvalue()
 
-# ====== EXECUÇÃO ======
+# ================== EXECUÇÃO ==================
 if uploaded_file is not None:
     try:
         with st.spinner("Processando..."):

@@ -89,7 +89,7 @@ div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:
 """, unsafe_allow_html=True)
 
 # ================== UPLOADER (APENAS 1) ==================
-uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")
+uploaded_file = st.file_uploader("", type=["pdf"], key="uploader_main")
 
 # ================== FUNÇÃO PRINCIPAL ==================
 def split_pdf_into_labels(file_like) -> bytes:

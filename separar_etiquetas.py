@@ -12,11 +12,8 @@ st.set_page_config(page_title="Separador de Etiquetas", layout="wide")
 # ---- esconder branding/menus/badge do Streamlit (não-oficial) ----
 st.markdown("""
 <style>
-/* menu e rodapé */
 #MainMenu, footer {visibility: hidden;}
-/* toolbar/topbar */
 header, [data-testid="stToolbar"], [data-testid="stDecoration"], .stDeployButton {display: none !important;}
-/* badge "Hosted with Streamlit" (várias formas) */
 div[class^="viewerBadge"], div[class*="viewerBadge"] {display: none !important;}
 [data-testid="stAppViewContainer"] a[href*="streamlit.io"] {display: none !important;}
 a[href*="streamlit.io"][style*="position: fixed"], a[href*="streamlit.app"][style*="position: fixed"] {display: none !important;}
@@ -28,7 +25,7 @@ BASE_DIR = Path(__file__).parent
 LOGO_LIGHT = BASE_DIR / "logo_light.png"   # para fundo claro
 LOGO_DARK  = BASE_DIR / "logo_dark.png"    # para fundo escuro
 
-def show_logo_center(width_px=460):
+def show_logo_center(width_px=480):
     theme_base = st.get_option("theme.base") or "light"
     logo_path = LOGO_LIGHT if theme_base == "light" else LOGO_DARK
     if not logo_path.exists():
@@ -45,7 +42,7 @@ def show_logo_center(width_px=460):
             unsafe_allow_html=True
         )
 
-show_logo_center(480)  # ajuste o tamanho da logo aqui
+show_logo_center(480)
 
 st.markdown(
     "<h1 style='text-align:center;margin:0.4rem 0 0 0;'>Separador de Etiquetas (4 -> 1)</h1>",
@@ -63,36 +60,80 @@ st.divider()
 # ================== ESTILO DO UPLOADER (500px + VERDE) ==================
 st.markdown("""
 <style>
-/* rótulo acima do uploader */
-div[data-testid="stFileUploader"] > label {
-    font-weight: 600;
-}
-/* dropzone do uploader */
+div[data-testid="stFileUploader"] > label { font-weight: 600; }
 div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]{
-    width: 500px !important;          /* largura fixa */
+    width: 500px !important;
     max-width: 100%;
-    margin: 0 auto !important;        /* centraliza */
+    margin: 0 auto !important;
     border-radius: 12px;
-    background-color: #16A34A !important;  /* verde */
+    background-color: #16A34A !important;
     border: 2px dashed rgba(255,255,255,0.6);
     padding: 1.25rem;
 }
-/* cor do texto/ícones internos */
 div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"] *{
     color: #FFFFFF !important;
 }
-/* hover */
 div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:hover{
     background-color: #15803D !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ================== UPLOADER (APENAS 1) ==================
-uploaded_file = st.file_uploader("", type=["pdf"], key="uploader_main")
+# ================== CONTROLES ==================
+uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")
+remove_blank = st.checkbox("Remover páginas em branco", value=True)
+
+# ================== HEURÍSTICA: página em branco ==================
+def is_blank_page(page) -> bool:
+    """
+    Heurística leve (sem rasterizar):
+    - se não há texto e o stream de conteúdo é vazio/whitespace ou só comandos inertes,
+      consideramos 'em branco'.
+    """
+    # 1) texto
+    txt = (page.extract_text() or "").strip()
+    if txt:
+        return False
+
+    # 2) conteúdo do stream
+    try:
+        contents = page.get_contents()  # pode ser None, um único stream, ou lista
+    except Exception:
+        contents = None
+
+    if contents is None:
+        return True
+
+    # agrega bytes do(s) stream(s)
+    data = b""
+    try:
+        if isinstance(contents, list):
+            for c in contents:
+                if hasattr(c, "get_data"):
+                    data += c.get_data()
+        else:
+            if hasattr(contents, "get_data"):
+                data = contents.get_data()
+    except Exception:
+        # se algo deu ruim ao ler, assume não em branco pra não descartar indevidamente
+        return False
+
+    d = b"".join(data.split())  # remove whitespace
+
+    if len(d) == 0:
+        return True
+
+    # Se tiver operadores típicos de desenho/texto/imagem, presume não branco.
+    # Observação: pode haver falsos positivos se o desenho estiver fora da área visível;
+    # para 100% de acurácia, usar render (PyMuPDF). Mantemos simples por enquanto.
+    markers = [b'Tj', b'TJ', b'/Do', b're', b'm', b'l', b'S', b's', b'f', b'B', b'BI', b'BT', b'ET']
+    if any(m in d for m in markers):
+        return False
+
+    return True
 
 # ================== FUNÇÃO PRINCIPAL ==================
-def split_pdf_into_labels(file_like) -> bytes:
+def split_pdf_into_labels(file_like, drop_blank=True) -> bytes:
     reader = PdfReader(file_like)
     writer = PdfWriter()
 
@@ -101,12 +142,11 @@ def split_pdf_into_labels(file_like) -> bytes:
         left, bottom, right, top = float(mb.left), float(mb.bottom), float(mb.right), float(mb.top)
         width, height = right - left, top - bottom
 
-        # 4 quadrantes (2x2): topo-esq, topo-dir, baixo-esq, baixo-dir
         quads = [
-            (left, bottom + height/2, left + width/2, top),
-            (left + width/2, bottom + height/2, right, top),
-            (left, bottom, left + width/2, bottom + height/2),
-            (left + width/2, bottom, right, bottom + height/2),
+            (left, bottom + height/2, left + width/2, top),   # topo-esq
+            (left + width/2, bottom + height/2, right, top),  # topo-dir
+            (left, bottom, left + width/2, bottom + height/2),# baixo-esq
+            (left + width/2, bottom, right, bottom + height/2)# baixo-dir
         ]
 
         for x0, y0, x1, y1 in quads:
@@ -114,6 +154,10 @@ def split_pdf_into_labels(file_like) -> bytes:
             rect = RectangleObject([x0, y0, x1, y1])
             p.cropbox = rect
             p.mediabox = rect
+
+            if drop_blank and is_blank_page(p):
+                continue
+
             writer.add_page(p)
 
     out = io.BytesIO()
@@ -125,7 +169,7 @@ def split_pdf_into_labels(file_like) -> bytes:
 if uploaded_file is not None:
     try:
         with st.spinner("Processando..."):
-            pdf_bytes = split_pdf_into_labels(uploaded_file)
+            pdf_bytes = split_pdf_into_labels(uploaded_file, drop_blank=remove_blank)
 
         st.success("Pronto! Seu PDF foi gerado.")
         st.download_button(
@@ -139,20 +183,17 @@ if uploaded_file is not None:
         st.error("Não foi possível processar o arquivo. Verifique se é um PDF válido.")
         st.exception(e)
 else:
-
-    # CSS só para este aviso
+    # centralizar e limitar a largura do aviso
     st.markdown("""
     <style>
     .info-centered [data-testid="stAlert"]{
         width: 500px !important;
-        
-        margin: 0 auto !important;   /* centraliza */
+        max-width: 100% !important;
+        margin: 0 auto !important;
         border-radius: 12px;
     }
     </style>
     """, unsafe_allow_html=True)
-
-    # envolve o st.info com um contêiner identificado
     st.markdown('<div class="info-centered">', unsafe_allow_html=True)
     st.info("Faça o upload de um PDF para iniciar o processamento.")
     st.markdown('</div>', unsafe_allow_html=True)

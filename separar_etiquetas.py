@@ -4,6 +4,24 @@ from pypdf.generic import RectangleObject
 from copy import deepcopy
 import io
 
+import streamlit as st
+from pathlib import Path
+
+# --- HEADER (fora de qualquer if) ---
+LOGO_PATH = Path(__file__).with_name("logo.png")
+
+if LOGO_PATH.exists():
+    st.image(str(LOGO_PATH), width=140)
+else:
+    st.warning(f"Logo não encontrada: {LOGO_PATH.name}")
+
+st.title("Separador de Etiquetas (4 -> 1)")
+st.write("Envie seu PDF com 4 etiquetas por página e baixe o resultado pronto para impressão.")
+
+# --- UPLOAD (depois do header) ---
+uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"])
+
+
 st.title("Separador de Etiquetas (4 por página ➜ 1 por página)")
 st.write("Envie seu PDF com 4 etiquetas por página e baixe o resultado pronto para impressão.")
 

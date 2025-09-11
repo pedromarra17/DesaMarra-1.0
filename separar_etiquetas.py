@@ -80,3 +80,117 @@ st.markdown(
     }
     div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:hover{
         background-color: #15803D !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ================== CONTROLES (remover branco ATIVADO e OCULTO) ==================
+uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")
+
+# parâmetros internos (sem UI)
+remove_blank = True          # sempre ligado
+dpi = 120                    # 72–220 (padrão 120)
+white_threshold = 245        # 230–255 (padrão 245)
+coverage = 0.995             # 0.90–1.00  (padrão 99,5%)
+
+# ================== BLANK PAGE (raster) ==================
+def quad_is_blank_by_raster(doc: fitz.Document, page_index: int, clip_rect: fitz.Rect,
+                            dpi: int = 120, white_thresh: int = 245, coverage: float = 0.995) -> bool:
+    p = doc[page_index]
+    scale = dpi / 72.0
+    pix = p.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip_rect, alpha=False)
+    if pix.width == 0 or pix.height == 0:
+        return True
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    gray = img.convert("L")
+    hist = gray.histogram()
+    total = sum(hist)
+    white_pixels = sum(hist[white_thresh:256])
+    frac_white = white_pixels / max(total, 1)
+    return frac_white >= coverage
+
+# ================== SPLIT + DROP BLANK ==================
+def split_pdf_into_labels_bytes(pdf_bytes: bytes, drop_blank=True,
+                                dpi=120, white_thresh=245, coverage=0.995) -> bytes:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    writer = PdfWriter()
+
+    for idx, page in enumerate(reader.pages):
+        mb = page.mediabox
+        left, bottom, right, top = float(mb.left), float(mb.bottom), float(mb.right), float(mb.top)
+        width, height = right - left, top - bottom
+
+        pypdf_quads = [
+            (left, bottom + height/2, left + width/2, top),           # topo-esq
+            (left + width/2, bottom + height/2, right, top),          # topo-dir
+            (left, bottom, left + width/2, bottom + height/2),        # baixo-esq
+            (left + width/2, bottom, right, bottom + height/2),       # baixo-dir
+        ]
+
+        r = doc[idx].rect
+        W, H = r.width, r.height
+        fitz_quads = [
+            fitz.Rect(r.x0,       r.y0,       r.x0 + W/2, r.y0 + H/2),  # topo-esq
+            fitz.Rect(r.x0 + W/2, r.y0,       r.x1,       r.y0 + H/2),  # topo-dir
+            fitz.Rect(r.x0,       r.y0 + H/2, r.x0 + W/2, r.y1),        # baixo-esq
+            fitz.Rect(r.x0 + W/2, r.y0 + H/2, r.x1,       r.y1),        # baixo-dir
+        ]
+
+        for (x0, y0, x1, y1), clip in zip(pypdf_quads, fitz_quads):
+            if drop_blank and quad_is_blank_by_raster(doc, idx, clip, dpi=dpi, white_thresh=white_thresh, coverage=coverage):
+                continue
+            p = deepcopy(page)
+            rect = RectangleObject([x0, y0, x1, y1])
+            p.cropbox = rect
+            p.mediabox = rect
+            writer.add_page(p)
+
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    return out.getvalue()
+
+# ================== RUN ==================
+if uploaded_file is not None:
+    try:
+        pdf_bytes_in = uploaded_file.getvalue()
+        with st.spinner("Processando..."):
+            pdf_bytes_out = split_pdf_into_labels_bytes(
+                pdf_bytes_in,
+                drop_blank=remove_blank,
+                dpi=dpi,
+                white_thresh=white_threshold,
+                coverage=coverage,
+            )
+        st.success("Pronto! Seu PDF foi gerado.")
+        st.download_button(
+            label="Baixar PDF separado",
+            data=pdf_bytes_out,
+            file_name="etiquetas_individuais.pdf",
+            mime="application/pdf",
+            key="download_main",
+        )
+    except Exception as e:
+        st.error("Não foi possível processar o arquivo. Verifique se é um PDF válido.")
+        st.exception(e)
+else:
+    # centraliza o aviso
+    st.markdown(
+        """
+        <style>
+        .info-centered [data-testid="stAlert"]{
+            width: 500px !important;
+            max-width: 100% !important;
+            margin: 0 auto !important;
+            border-radius: 12px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="info-centered">', unsafe_allow_html=True)
+    st.info("Faça o upload de um PDF para iniciar o processamento.")
+    st.markdown('</div>', unsafe_allow_html=True)

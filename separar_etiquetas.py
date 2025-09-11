@@ -15,9 +15,9 @@ c1, c2, c3 = st.columns([1, 3, 1])
 with c2:
     if LOGO_PATH.exists():
         # Ajuste o tamanho conforme desejar
-        st.image(str(LOGO_PATH), width=300)
+        st.image(str(LOGO_PATH), width=500)
     st.markdown(
-        "<h1 style='text-align:center; margin:0;'>Separador de Etiquetas (4 -> 1)</h1>",
+        "<h1 style='text-align:center; margin:0;'>Separador de Etiquetas (4 > 1)</h1>",
         unsafe_allow_html=True
     )
     st.markdown(

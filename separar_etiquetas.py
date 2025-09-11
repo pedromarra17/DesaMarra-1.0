@@ -139,4 +139,20 @@ if uploaded_file is not None:
         st.error("Não foi possível processar o arquivo. Verifique se é um PDF válido.")
         st.exception(e)
 else:
+
+    # CSS só para este aviso
+    st.markdown("""
+    <style>
+    .info-centered [data-testid="stAlert"]{
+        width: 500px !important;
+        max-width: 100% !important;
+        margin: 0 auto !important;   /* centraliza */
+        border-radius: 12px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # envolve o st.info com um contêiner identificado
+    st.markdown('<div class="info-centered">', unsafe_allow_html=True)
     st.info("Faça o upload de um PDF para iniciar o processamento.")
+    st.markdown('</div>', unsafe_allow_html=True)

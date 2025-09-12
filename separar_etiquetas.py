@@ -51,7 +51,7 @@ def show_logo_center(width_px: int = 480):
 
 show_logo_center(480)
 st.markdown(
-    "<h1 style='text-align:center;margin:0.4rem 0 0 0;'>Separador de Etiquetas (4 -> 1)</h1>",
+    "<h1 style='text-align:center;margin:0.4rem 0 0 0;'>Separador de Etiquetas (4 > 1)</h1>",
     unsafe_allow_html=True,
 )
 st.markdown(

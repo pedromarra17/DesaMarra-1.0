@@ -240,13 +240,12 @@ def process_pdf(pdf_bytes: bytes, show_diag: bool = False):
     reader = PdfReader(io.BytesIO(pdf_bytes))
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    # coleta quadrante a quadrante
     pick_by_order = {}   # order -> [produtos]
-    label_quads = []     # candidatos de etiqueta (para resolver depois com allowed)
+    label_quads = []     # candidatos a etiqueta (mesmo sem order)
 
-    diag_picks = []      # diagnóstico
-    diag_labels = []
+    diag_picks, diag_labels = [], []  # diagnóstico
 
+    # --- varre quadrante a quadrante ---
     for i in range(len(doc)):
         p_fitz = doc[i]
         qf = quadrants_fitz(p_fitz.rect)
@@ -255,7 +254,7 @@ def process_pdf(pdf_bytes: bytes, show_diag: bool = False):
         for rect_fitz, box_pdf in zip(qf, qp):
             txt = p_fitz.get_text("text", clip=rect_fitz) or ""
 
-            # 1) tenta identificar como picklist (se tiver pedido + produtos)
+            # tenta picklist
             order_pk = extract_order_pick(txt)
             prods    = extract_products(txt) if order_pk else []
             if order_pk and prods:
@@ -267,7 +266,7 @@ def process_pdf(pdf_bytes: bytes, show_diag: bool = False):
                     diag_picks.append((order_pk, prods[:3]))
                 continue
 
-            # 2) se não parece picklist, guarda como possível etiqueta
+            # candidato a etiqueta (não branco)
             if REMOVE_BLANK and quad_is_blank_by_raster(doc, i, rect_fitz):
                 continue
             label_quads.append({
@@ -286,7 +285,63 @@ def process_pdf(pdf_bytes: bytes, show_diag: bool = False):
         if show_diag:
             diag_labels.append(order)
 
-    # monta PDF cortando etiqueta e criando página com faixa extra
+    # ========== FALLBACK 1: sem nenhum 'order' casado, mas com etiquetas detectadas ==========
+    if not order_sequence and label_quads:
+        writer = PdfWriter()
+        for lab in label_quads:
+            p_src = reader.pages[lab["page_idx"]]
+            x0, y0, x1, y1 = lab["pypdf_box"]
+            p = deepcopy(p_src)
+            rect = RectangleObject([x0, y0, x1, y1])
+            p.cropbox = rect
+            p.mediabox = rect
+            writer.add_page(p)
+        tmp = io.BytesIO()
+        writer.write(tmp); tmp.seek(0)
+        cropped_doc = fitz.open(stream=tmp.getvalue(), filetype="pdf")
+
+        final_doc = fitz.open()
+        for idx in range(len(cropped_doc)):
+            src_pg = cropped_doc[idx]
+            r = src_pg.rect
+            # cria faixa mínima para pelo menos 1 linha
+            lines_count = 2  # "Produtos:" + 1
+            min_area_pt = PAD_Y_PT*2 + (FONT_SIZE + 2) * lines_count
+            extra_h = max(r.height * OVERLAY_HEIGHT_PCT, min_area_pt)
+
+            new_pg = final_doc.new_page(width=r.width, height=r.height + extra_h)
+            new_pg.show_pdf_page(fitz.Rect(0, 0, r.width, r.height), cropped_doc, idx)
+
+            box = fitz.Rect(MARGIN_X_PT, r.height + PAD_Y_PT,
+                            r.width - MARGIN_X_PT, r.height + extra_h - PAD_Y_PT)
+            new_pg.insert_textbox(box, "Produtos:\n• (não encontrado)", fontname="helv",
+                                  fontsize=FONT_SIZE, align=0)
+
+        out_buf = io.BytesIO()
+        final_doc.save(out_buf)
+        final_doc.close()
+        out_buf.seek(0)
+        diag = {"picks": diag_picks, "labels": diag_labels, "orders": order_sequence}
+        return out_buf.getvalue(), diag
+
+    # ========== FALLBACK 2: nada detectado mesmo ==========
+    if not order_sequence and not label_quads:
+        writer = PdfWriter()
+        for i in range(len(reader.pages)):
+            page = reader.pages[i]
+            for (x0, y0, x1, y1) in quadrants_pypdf(page.mediabox):
+                if REMOVE_BLANK and quad_is_blank_by_raster(doc, i, fitz.Rect(x0, y0, x1, y1)):
+                    continue
+                p = deepcopy(page)
+                rect = RectangleObject([x0, y0, x1, y1])
+                p.cropbox = rect
+                p.mediabox = rect
+                writer.add_page(p)
+        out = io.BytesIO(); writer.write(out); out.seek(0)
+        diag = {"picks": diag_picks, "labels": diag_labels, "orders": []}
+        return out.getvalue(), diag
+
+    # ========== CAMINHO NORMAL (há orders casados) ==========
     writer = PdfWriter()
     for order in order_sequence:
         info = labels_by_order[order]
@@ -301,31 +356,24 @@ def process_pdf(pdf_bytes: bytes, show_diag: bool = False):
     tmp = io.BytesIO()
     writer.write(tmp)
     tmp.seek(0)
-    cropped_bytes = tmp.getvalue()
+    cropped_doc = fitz.open(stream=tmp.getvalue(), filetype="pdf")
 
-    cropped_doc = fitz.open(stream=cropped_bytes, filetype="pdf")
-    final_doc   = fitz.open()
-
+    final_doc = fitz.open()
     for idx, order in enumerate(order_sequence):
         src_pg = cropped_doc[idx]
         r = src_pg.rect
         products = pick_by_order.get(order, [])[:MAX_LINES]
 
-        # altura da faixa
-        lines_count = 1 + max(1, len(products))  # sempre escreve "Produtos" e pelo menos 1 linha
+        lines_count = 1 + max(1, len(products))
         min_area_pt = PAD_Y_PT*2 + (FONT_SIZE + 2) * lines_count
         extra_h = max(r.height * OVERLAY_HEIGHT_PCT, min_area_pt)
 
         new_pg = final_doc.new_page(width=r.width, height=r.height + extra_h)
         new_pg.show_pdf_page(fitz.Rect(0, 0, r.width, r.height), cropped_doc, idx)
 
-        # texto do rodapé (sempre escreve; se vazio mostra aviso)
         box = fitz.Rect(MARGIN_X_PT, r.height + PAD_Y_PT,
                         r.width - MARGIN_X_PT, r.height + extra_h - PAD_Y_PT)
-        if products:
-            text = "Produtos:\n" + "\n".join(f"• {p}" for p in products)
-        else:
-            text = "Produtos:\n• (não encontrado nesta lista)"
+        text = "Produtos:\n" + ("\n".join(f"• {p}" for p in products) if products else "• (não encontrado)")
         new_pg.insert_textbox(box, text, fontname="helv", fontsize=FONT_SIZE, align=0)
 
     out_buf = io.BytesIO()

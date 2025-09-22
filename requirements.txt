@@ -1,6 +1,6 @@
 streamlit
 pypdf
-streamlit
-pypdf
 PyMuPDF
 pillow
+rapidfuzz
+reportlab

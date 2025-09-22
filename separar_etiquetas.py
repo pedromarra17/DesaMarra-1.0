@@ -11,7 +11,7 @@ from PIL import Image
 # ================== CONFIG BÁSICA ==================
 st.set_page_config(page_title="Etiquetas 4→1 + Lista (QNT + SKU)", layout="wide")
 
-# Oculta branding/toolbar (o selo pode não sumir 100% no Cloud)
+# Oculta branding/toolbar (no Cloud o selo pode não sumir 100%)
 st.markdown("""
 <style>
 #MainMenu, footer {visibility: hidden;}
@@ -191,11 +191,15 @@ def extract_order_label(text: str, allowed: set[str]) -> str:
             return tok
     return ""
 
-# ====== LISTA: QNT + SKU (sem depender de cabeçalho) ======
+# ====== LISTA: QNT + SKU (conservador) ======
+EXCLUDE_LABEL_WORDS = [
+    "danfe", "destinat", "remetente", "agência", "agencia",
+    "bairro", "cep", "emissão", "emissao", "série", "serie"
+]
 STOP_WORDS = ["checklist de carregamento", "id pedido", "corte aqui", "pagamento", "assinatura"]
 
-# SKU precisa ter PELO MENOS UMA LETRA (evita números do barcode/CEP)
-SKU_TOKEN_RE = re.compile(r"\b(?=[A-Z0-9\-]{6,32}\b)(?=.*[A-Z])[A-Z0-9\-]+\b")
+# SKU deve ter ao menos UMA LETRA e UM DÍGITO (evita códigos da etiqueta)
+SKU_TOKEN_RE = re.compile(r"\b(?=[A-Z0-9\-]{5,32}\b)(?=.*[A-Z])(?=.*\d)[A-Z0-9\-]+\b")
 
 QTY_PATTS = [
     re.compile(r"(?:QNT|QTD|QTDE|QUANTIDADE)\s*[:x\-]*\s*(\d{1,3})", re.I),
@@ -206,24 +210,38 @@ QTY_PATTS = [
 
 def extract_products_from_quad(text: str) -> list[str]:
     """
-    Detecta se o quadrante é LISTA (>=2 SKUs com letras) e
-    retorna linhas formatadas '2× Nome — SKU'.
+    Detecta LISTA de separação com heurística conservadora:
+    - deve conter 'SKU' OU ('Produto' E 'QNT/QTD/QTDE/Quantidade');
+    - não pode conter palavras típicas de etiqueta;
+    - deve haver ao menos 1 SKU real (letras+núm).
+    Retorna linhas '2× Nome — SKU'.
     """
-    s = norm_heavy(text)
-    lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+    raw = norm_heavy(text)
+    s = raw.lower()
 
-    # conta SKUs no quadrante inteiro
+    # exclusões típicas de etiqueta
+    if any(w in s for w in EXCLUDE_LABEL_WORDS):
+        return []
+
+    # pistas de lista
+    has_sku_word  = re.search(r"s\s*k\s*u", s) is not None
+    has_prod_word = re.search(r"p\s*r\s*o\s*d\s*u\s*t\s*o", s) is not None
+    has_qty_word  = any(re.search(pat, s) for pat in [r"q\s*n\s*t", r"q\s*t\s*d", r"q\s*t\s*d\s*e", r"q\s*u\s*a\s*n\s*t"])
+
+    # conta SKUs válidos
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     all_skus = []
     for ln in lines:
         all_skus += [t for t in SKU_TOKEN_RE.findall(ln) if not t.startswith("BR")]
-    if len(set(all_skus)) < 2:
-        return []  # provavelmente não é lista (evita confundir com etiqueta)
+
+    if not ((has_sku_word or (has_prod_word and has_qty_word)) and len(set(all_skus)) >= 1):
+        return []
 
     items, buf = [], []
 
     def flush():
         nonlocal buf
-        if not buf: 
+        if not buf:
             return
         base = re.sub(r"\s+", " ", " ".join(buf)).strip()
 
@@ -239,7 +257,7 @@ def extract_products_from_quad(text: str) -> list[str]:
         if qty is None:
             qty = 1
 
-        # sku (prefere após "SKU")
+        # sku (prefere após 'SKU')
         sku = None
         msku = re.search(r"S\s*K\s*U[:\s\-]*([A-Z0-9\s\-]{4,})", base, re.I)
         if msku:
@@ -266,7 +284,7 @@ def extract_products_from_quad(text: str) -> list[str]:
             items.append(line[:110] + ("..." if len(line) > 110 else ""))
         buf = []
 
-    # agrupa em blocos por tamanho/pistas
+    # agrupa por tamanho/pistas
     for ln in lines:
         low = ln.lower()
         if any(sw in low for sw in STOP_WORDS):
@@ -357,7 +375,7 @@ def process_pdf(pdf_bytes: bytes, show_diag: bool = False):
             src_pg = cropped_doc[idx]
             r = src_pg.rect
             products = pick_by_order.get(order, [])
-            # se não achou por pedido, tenta parear por ordem com as listas avulsas
+            # se não achou por pedido, tenta por ordem
             if not products and pick_no_order:
                 take = min(idx, len(pick_no_order)-1)
                 products = pick_no_order[take]

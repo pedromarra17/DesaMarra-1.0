@@ -5,12 +5,12 @@ from copy import deepcopy
 from pathlib import Path
 import base64, io, re, unicodedata
 
-# ---- raster / desenho direto no PDF (sem merge) ----
+# desenhar e montar páginas finais (sem merge_page)
 import fitz  # PyMuPDF
 from PIL import Image
 
 # ================== CONFIG ==================
-st.set_page_config(page_title="Etiquetas 4→1 + Lista no rodapé (estável)", layout="wide")
+st.set_page_config(page_title="Etiquetas 4→1 + Lista no rodapé (sem sobrepor)", layout="wide")
 
 # ================== HIDE STREAMLIT BRANDING ==================
 st.markdown("""
@@ -50,7 +50,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    "<p style='text-align:center;margin-top:0.25rem;'>Pareamento pelo <b>PEDIDO</b>. Texto dos <b>produtos</b> é escrito diretamente no rodapé da etiqueta (sem mesclar PDFs).</p>",
+    "<p style='text-align:center;margin-top:0.25rem;'>Pareamento pelo <b>PEDIDO</b>. O rodapé é impresso em uma <b>faixa extra abaixo</b> da etiqueta (sem sobrepor o código de barras).</p>",
     unsafe_allow_html=True,
 )
 
@@ -81,17 +81,17 @@ div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:
 uploaded_file = st.file_uploader("Selecione o PDF da Shopee (etiquetas + lista)", type=["pdf"], key="uploader_main")
 
 # ================== CONSTANTES ==================
-# limpeza de quadrantes vazios
 REMOVE_BLANK   = True
 DPI_CHECK      = 120
 WHITE_THRESH   = 245
 COVERAGE       = 0.995   # 99,5% branco = vazio
 
-# rodapé (onde imprimir os produtos)
-OVERLAY_HEIGHT_PCT = 0.14  # 14% da altura da etiqueta
-OVERLAY_MARGIN_X   = 18
+# área do rodapé (novo espaço abaixo da etiqueta)
+OVERLAY_HEIGHT_PCT = 0.14   # % da altura da etiqueta usada como faixa extra
 FONT_SIZE          = 7
 MAX_LINES          = 4
+MARGIN_X_PT        = 18      # margens laterais do texto
+PAD_Y_PT           = 6       # padding vertical interno da faixa
 
 # palavras-chave
 PICKLIST_HINTS = ["checklist de carregamento", "produto", "variação", "variacao", "qnt", "sku", "id pedido", "corte aqui"]
@@ -113,7 +113,6 @@ def is_label_page_text(page_text: str) -> bool:
 
 # ====== PEDIDO ======
 def extract_order_from_picklist_quad(text: str) -> str:
-    """Tenta pegar o token imediatamente antes de 'PACKAGE' ou próximo de 'ID Pedido'."""
     up = text.upper()
     m = re.search(r"([A-Z0-9]{10,24})\s+PACKAGE\b", up)
     if m:
@@ -125,7 +124,6 @@ def extract_order_from_picklist_quad(text: str) -> str:
         tok = re.sub(r"[^A-Z0-9]","", m2.group(1))
         if not tok.startswith("BR") and re.search(r"[A-Z]", tok) and re.search(r"\d", tok):
             return tok
-    # fallback seguro: maior token alfanum sem BR
     for m3 in re.finditer(r"\b[A-Z0-9]{10,24}\b", up):
         tok = m3.group(0)
         if tok.startswith("BR"): 
@@ -135,7 +133,6 @@ def extract_order_from_picklist_quad(text: str) -> str:
     return ""
 
 def extract_order_from_label_quad(text: str, allowed_set: set[str]) -> str:
-    """Na etiqueta só aceitamos tokens que aparecem nas picklists (evita CEP/NF)."""
     up = text.upper()
     cands = []
     for m in re.finditer(r"\b([A-Z0-9]{10,24})\b", up):
@@ -178,27 +175,22 @@ def extract_products_from_picklist(text: str) -> list[str]:
 
     for raw in lines:
         low = normalize_txt(raw).lower()
-
         if any(s in low for s in STOP_WORDS):
             break
-
         if not started:
             if is_header_line(low):
                 started = True
             continue
-
         if is_header_line(low):
             continue
         if re.match(r"^\s*\d+\s*$", low):
             continue
-
         if re.match(r"^\s*\d+\s", raw) or (len(cur) > 0 and len(raw) > 40):
             if cur:
                 push()
             cur = raw
         else:
             cur = (cur + " " + raw) if cur else raw
-
         if len(items) >= MAX_LINES:
             break
 
@@ -253,23 +245,16 @@ def quad_is_blank_by_raster(doc: fitz.Document, page_index: int, clip_rect: fitz
 
 # ================== PIPELINE ==================
 def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
-    """
-    1) Extrai todos os PEDIDOS + produtos a partir das páginas de 'lista de separação'
-    2) Seleciona 1 etiqueta por PEDIDO (dedup), cortando 4→1 com pypdf
-    3) Escreve (com PyMuPDF) o rodapé de produtos diretamente nas páginas finais
-    """
-    # Abrimos o PDF completo com as duas libs
     reader_full = PdfReader(io.BytesIO(pdf_bytes))
     doc_full = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    # ---------- 1) COLETAR LISTAS (PEDIDO -> produtos) ----------
-    pick_by_order: dict[str, list[str]] = {}
+    # 1) Coleta listas -> {order: [produtos]}
+    pick_by_order = {}
     for i in range(len(doc_full)):
         page = doc_full[i]
         if not is_picklist_page_text(page.get_text("text")):
             continue
-        qf = quadrants_fitz(page.rect)
-        for rect in qf:
+        for rect in quadrants_fitz(page.rect):
             qt = page.get_text("text", clip=rect) or ""
             order = extract_order_from_picklist_quad(qt)
             if not order:
@@ -284,7 +269,7 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
 
     allowed_orders = set(pick_by_order.keys())
     if not allowed_orders:
-        # sem listas não tem como casar; retorna só o 4→1 básico
+        # fallback: só 4→1
         writer = PdfWriter()
         for i in range(len(reader_full.pages)):
             page = reader_full.pages[i]
@@ -293,19 +278,15 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
                 rect = RectangleObject([x0, y0, x1, y1])
                 p.cropbox = rect
                 p.mediabox = rect
-                # opcional: drop blank
-                if REMOVE_BLANK:
-                    # checa com fitz
-                    if quad_is_blank_by_raster(doc_full, i,
-                                               fitz.Rect(x0, y0, x1, y1)):
-                        continue
+                if REMOVE_BLANK and quad_is_blank_by_raster(doc_full, i, fitz.Rect(x0, y0, x1, y1)):
+                    continue
                 writer.add_page(p)
         out = io.BytesIO(); writer.write(out); out.seek(0)
         return out.getvalue()
 
-    # ---------- 2) SELECIONAR 1 ETIQUETA POR PEDIDO (DEDUP) ----------
-    labels_by_order: dict[str, dict] = {}   # order -> info p/ crop
-    order_sequence: list[str] = []          # ordem de saída
+    # 2) Seleciona 1 etiqueta por PEDIDO
+    labels_by_order = {}
+    order_sequence = []
     for i in range(len(doc_full)):
         page = doc_full[i]
         if not is_label_page_text(page.get_text("text")):
@@ -313,7 +294,6 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
         qf = quadrants_fitz(page.rect)
         qp = quadrants_pypdf(reader_full.pages[i].mediabox)
         for rect_fitz, box_pdf in zip(qf, qp):
-            # remove quadrante vazio
             if REMOVE_BLANK and quad_is_blank_by_raster(doc_full, i, rect_fitz):
                 continue
             qt = page.get_text("text", clip=rect_fitz) or ""
@@ -323,7 +303,7 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
             labels_by_order[order] = {"page_idx": i, "pypdf_box": box_pdf}
             order_sequence.append(order)
 
-    # ---------- 3) CORTAR AS ETIQUETAS (pypdf) ----------
+    # 3) Corta as etiquetas (pypdf)
     writer = PdfWriter()
     for order in order_sequence:
         info = labels_by_order[order]
@@ -340,29 +320,36 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
     tmp.seek(0)
     cropped_bytes = tmp.getvalue()
 
-    # ---------- 4) ESCREVER O RODAPÉ (PyMuPDF, sem merge) ----------
-    out_doc = fitz.open(stream=cropped_bytes, filetype="pdf")
-    for page_idx, order in enumerate(order_sequence):
-        products = pick_by_order.get(order, [])[:MAX_LINES]
-        if not products:
-            continue
-        pg = out_doc[page_idx]
-        r = pg.rect
-        area_h = r.height * OVERLAY_HEIGHT_PCT
-        pad = 4
-        # caixa no rodapé
-        box = fitz.Rect(OVERLAY_MARGIN_X, r.height - area_h - pad,
-                        r.width - OVERLAY_MARGIN_X, r.height - pad)
-        # monta texto
-        lines = ["Produtos:"] + [f"• {t}" for t in products]
-        text = "\n".join(lines)
-        # escreve texto (PyMuPDF usa fontes padrão, não corrompe)
-        pg.insert_textbox(box, text, fontname="helv", fontsize=FONT_SIZE, align=0)  # left
+    # 4) Monta documento final: página maior (etiqueta em cima + faixa extra embaixo)
+    cropped_doc = fitz.open(stream=cropped_bytes, filetype="pdf")
+    final_doc = fitz.open()
 
-    # salva como bytes
+    for page_idx, order in enumerate(order_sequence):
+        src_pg = cropped_doc[page_idx]
+        r = src_pg.rect
+        products = pick_by_order.get(order, [])[:MAX_LINES]
+
+        # calcula altura necessária da faixa
+        lines_count = 1 + len(products)  # "Produtos:" + itens
+        min_area_pt = PAD_Y_PT*2 + (FONT_SIZE + 2) * lines_count
+        extra_h = max(r.height * OVERLAY_HEIGHT_PCT, min_area_pt)
+
+        # cria nova página (largura igual; altura = etiqueta + faixa)
+        new_pg = final_doc.new_page(width=r.width, height=r.height + extra_h)
+
+        # coloca a etiqueta original no topo da página nova
+        new_pg.show_pdf_page(fitz.Rect(0, 0, r.width, r.height), cropped_doc, page_idx)
+
+        # escreve o rodapé na faixa extra (sem sobrepor a etiqueta)
+        if products:
+            box = fitz.Rect(MARGIN_X_PT, r.height + PAD_Y_PT,
+                            r.width - MARGIN_X_PT, r.height + extra_h - PAD_Y_PT)
+            text = "Produtos:\n" + "\n".join(f"• {p}" for p in products)
+            new_pg.insert_textbox(box, text, fontname="helv", fontsize=FONT_SIZE, align=0)
+
     out_buf = io.BytesIO()
-    out_doc.save(out_buf)
-    out_doc.close()
+    final_doc.save(out_buf)
+    final_doc.close()
     out_buf.seek(0)
     return out_buf.getvalue()
 
@@ -370,9 +357,9 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
 if uploaded_file is not None:
     try:
         pdf_bytes_in = uploaded_file.getvalue()
-        with st.spinner("Processando: casando PEDIDO e escrevendo rodapé..."):
+        with st.spinner("Processando (faixa extra para o rodapé)..."):
             pdf_bytes_out = process_pdf_with_picklist(pdf_bytes_in)
-        st.success("Pronto! 1 etiqueta por pedido, com os produtos no rodapé.")
+        st.success("Pronto! 1 etiqueta por pedido, com a lista no rodapé sem sobrepor o código.")
         st.download_button(
             label="Baixar PDF final",
             data=pdf_bytes_out,
@@ -384,7 +371,6 @@ if uploaded_file is not None:
         st.error("Não foi possível processar o arquivo. Verifique se é um PDF válido.")
         st.exception(e)
 else:
-    # aviso centralizado
     st.markdown("""
     <style>
     .info-centered [data-testid="stAlert"]{

@@ -12,7 +12,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import portrait
 
 # ================== PAGE CONFIG ==================
-st.set_page_config(page_title="Etiquetas 4→1 + Lista de Separação no Rodapé", layout="wide")
+st.set_page_config(page_title="Etiquetas 4→1 + Lista (produtos) no rodapé", layout="wide")
 
 # ================== HIDE STREAMLIT BRANDING ==================
 st.markdown("""
@@ -52,7 +52,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    "<p style='text-align:center;margin-top:0.25rem;'>PDF único da Shopee: casamos cada <b>Etiqueta</b> com a <b>Lista de Separação</b> pelo <b>PEDIDO</b> e imprimimos os <b>produtos</b> no rodapé da etiqueta.</p>",
+    "<p style='text-align:center;margin-top:0.25rem;'>Casamento <b>pelo PEDIDO</b> e impressão das <b>linhas de produtos</b> no rodapé da etiqueta.</p>",
     unsafe_allow_html=True,
 )
 
@@ -84,27 +84,21 @@ div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:
 uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")
 
 # ====== CONSTANTES ======
-# limpeza de quadrantes vazios (após crop 4→1)
 REMOVE_BLANK   = True
 DPI_CHECK      = 120
 WHITE_THRESH   = 245
-COVERAGE       = 0.995   # 99,5% de branco = vazio
+COVERAGE       = 0.995   # 99,5% branco = vazio
 
-# rodapé (onde imprimir os produtos)
-OVERLAY_HEIGHT_PCT = 0.16  # 16% da altura (ajuste fino se cobrir barra)
+OVERLAY_HEIGHT_PCT = 0.14  # 14% da altura da etiqueta (mais seguro p/ não encostar no código de barras)
 OVERLAY_MARGIN_X   = 18
 FONT_SIZE          = 7
 MAX_LINES          = 4
 
-# ====== PALAVRAS-CHAVE (ajustadas ao seu PDF)
-# etiquetas (ex.: "DANFE SIMPLIFICADO - ETIQUETA")
-LABEL_HINTS = ["danfe", "etiqueta", "destinatário", "remetente"]
-# listas de separação (no seu arquivo aparecem estes termos)
-PICKLIST_HINTS = [
-    "checklist de carregamento", "produto", "variação", "qnt", "sku", "id pedido", "corte aqui"
-]
+# ====== PALAVRAS-CHAVE ======
+PICKLIST_HINTS = ["checklist de carregamento", "produto", "variação", "variacao", "qnt", "sku", "id pedido", "corte aqui"]
+LABEL_HINTS    = ["danfe", "etiqueta", "destinatário", "destinatario", "remetente"]
 
-# ====== UTILS ======
+# ====== HELPERS ======
 def normalize_txt(t: str) -> str:
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
@@ -112,145 +106,106 @@ def normalize_txt(t: str) -> str:
 
 def is_picklist_page_text(page_text: str) -> bool:
     t = normalize_txt(page_text).lower()
-    hit = 0
-    for k in PICKLIST_HINTS:
-        if k in t:
-            hit += 1
-    return hit >= 2  # exige pelo menos 2 sinais da lista
+    return sum(1 for k in PICKLIST_HINTS if k in t) >= 2
 
 def is_label_page_text(page_text: str) -> bool:
     t = normalize_txt(page_text).lower()
     return any(k in t for k in LABEL_HINTS)
 
-# ——— PEDIDO ———
-# Regex principal: “Pedido: XXXXX” ou “ID Pedido XXXXX”
-ORDER_NEAR_RE = re.compile(r"(?:pedido|id\s*pedido)[:\s#-]*([A-Z0-9\-\s]{8,})", re.I)
+# ====== PEDIDO ======
+def extract_order_from_picklist_quad(text: str) -> str:
+    """Pega o token imediatamente antes de 'package' (formato Shopee)."""
+    up = text.upper()
+    m = re.search(r"([A-Z0-9]{10,24})\s+PACKAGE\b", up)
+    if m:
+        tok = m.group(1)
+        if not tok.startswith("BR") and re.search(r"[A-Z]", tok) and re.search(r"\d", tok):
+            return tok
+    # fallback: perto de 'ID Pedido'
+    m2 = re.search(r"ID\s*PEDIDO.*?([A-Z0-9]{10,24})", up)
+    if m2:
+        tok = re.sub(r"[^A-Z0-9]","", m2.group(1))
+        if not tok.startswith("BR") and re.search(r"[A-Z]", tok) and re.search(r"\d", tok):
+            return tok
+    return ""
 
-def extract_order_candidates(text: str) -> list[str]:
-    """
-    Extrai possíveis IDs de pedido mesmo que estejam quebrados (ex.: '25 09 17 NM 75 ND 5E').
-    1) Prioriza captura perto de 'Pedido' / 'ID Pedido'.
-    2) Se nada encontrado, procura tokens alfanum longos no texto todo.
-    """
+def extract_order_from_label_quad(text: str, allowed_set: set[str]) -> str:
+    """Procura tokens alfanum (10–24), com >=2 letras e >=1 dígito, e que existam na picklist."""
     up = text.upper()
     cands = []
+    for m in re.finditer(r"\b([A-Z0-9]{10,24})\b", up):
+        tok = m.group(1)
+        if tok.startswith("BR"):            # ignora códigos logísticos
+            continue
+        if len(re.findall(r"[A-Z]", tok)) < 2 or not re.search(r"\d", tok):
+            continue
+        cands.append(tok)
+    for tok in cands:
+        if tok in allowed_set:
+            return tok
+    return ""
 
-    # 1) Perto de "Pedido" / "ID Pedido"
-    for m in ORDER_NEAR_RE.finditer(up):
-        raw = m.group(1)
-        token = re.sub(r"[^A-Z0-9]", "", raw)
-        if 10 <= len(token) <= 24 and not token.startswith("BR") and not token.isdigit():
-            cands.append(token)
-
-    # 2) Varredura geral (captura sequências alfanum longas, removendo espaços/hífens)
-    for m in re.finditer(r"([A-Z0-9][A-Z0-9\-\s]{10,24})", up):
-        token = re.sub(r"[^A-Z0-9]", "", m.group(1))
-        if 10 <= len(token) <= 24 and not token.startswith("BR") and not token.isdigit():
-            cands.append(token)
-
-    # ordena pela maior probabilidade (tamanho maior primeiro) e deduplica
-    uniq = []
-    seen = set()
-    for tk in sorted(cands, key=len, reverse=True):
-        if tk not in seen:
-            uniq.append(tk)
-            seen.add(tk)
-    return uniq
-
-def pick_best_order(text: str) -> str:
-    cands = extract_order_candidates(text)
-    return cands[0] if cands else ""
-
-# ——— PRODUTOS (a partir da lista de separação) ———
+# ====== PRODUTOS ======
 STOP_WORDS = ["checklist de carregamento", "id pedido", "corte aqui"]
-
 def extract_products_from_picklist(text: str) -> list[str]:
-    """
-    Heurística para pegar as linhas de produto:
-    - começa após detectar cabeçalho 'Produto' / 'Variação' / 'Qnt' / 'SKU'
-    - junta quebras de linha em descrições longas
-    - para ao encontrar blocos finais (checklist/id pedido/corte aqui)
-    """
     lines = [ln.strip() for ln in text.splitlines()]
     started = False
-    items = []
-    cur = ""
+    items, cur = [], ""
 
-    def push_current():
+    def push():
         nonlocal cur
         t = normalize_txt(cur)
         if len(t) >= 2 and re.search(r"[A-Za-z]", t):
-            if len(t) > 90:
-                t = t[:87] + "..."
-            items.append(t)
+            items.append(t[:90] + ("..." if len(t) > 90 else ""))
         cur = ""
 
     for raw in lines:
         low = normalize_txt(raw).lower()
-
         if any(s in low for s in STOP_WORDS):
-            # fim da área útil
             break
-
-        # detectar cabeçalho
         if not started:
             if ("produto" in low and "qnt" in low) or ("variação" in low) or ("variacao" in low):
                 started = True
             continue
-
-        # já estamos na área de itens
         if re.match(r"^\s*\d+\s*$", low):
-            # números de linha sozinhos: ignora
             continue
-
-        # nova linha de item quando começa com número+espaço ou quando a linha é longa
         if re.match(r"^\s*\d+\s", raw) or (len(cur) > 0 and len(raw) > 40):
             if cur:
-                push_current()
+                push()
             cur = raw
         else:
-            # apenda fragmentos (descrições quebradas)
-            sep = " " if cur else ""
-            cur = f"{cur}{sep}{raw}"
-
+            cur = (cur + " " + raw) if cur else raw
         if len(items) >= MAX_LINES:
             break
-
     if cur and len(items) < MAX_LINES:
-        push_current()
-
-    # fallback: se nada capturado, pegue as 3-4 primeiras linhas “ricas”
+        push()
     if not items:
-        rough = []
         for ln in lines:
             l = normalize_txt(ln)
-            if any(s in l.lower() for s in STOP_WORDS):
-                break
+            if any(s in l.lower() for s in STOP_WORDS): break
             if len(l) > 3 and re.search(r"[A-Za-z]", l):
-                rough.append(l if len(l) <= 90 else l[:87] + "...")
-            if len(rough) >= MAX_LINES:
-                break
-        items = rough
+                items.append(l[:90] + ("..." if len(l) > 90 else ""))
+            if len(items) >= MAX_LINES: break
     return items[:MAX_LINES]
 
 # ======= QUADRANTES =======
 def quadrants_fitz(rect: fitz.Rect):
     W, H = rect.width, rect.height
     return [
-        fitz.Rect(rect.x0,       rect.y0,       rect.x0 + W/2, rect.y0 + H/2),  # topo-esq
-        fitz.Rect(rect.x0 + W/2, rect.y0,       rect.x1,       rect.y0 + H/2),  # topo-dir
-        fitz.Rect(rect.x0,       rect.y0 + H/2, rect.x0 + W/2, rect.y1),        # baixo-esq
-        fitz.Rect(rect.x0 + W/2, rect.y0 + H/2, rect.x1,       rect.y1),        # baixo-dir
+        fitz.Rect(rect.x0,       rect.y0,       rect.x0 + W/2, rect.y0 + H/2),
+        fitz.Rect(rect.x0 + W/2, rect.y0,       rect.x1,       rect.y0 + H/2),
+        fitz.Rect(rect.x0,       rect.y0 + H/2, rect.x0 + W/2, rect.y1),
+        fitz.Rect(rect.x0 + W/2, rect.y0 + H/2, rect.x1,       rect.y1),
     ]
 
 def quadrants_pypdf(mb):
     left, bottom, right, top = float(mb.left), float(mb.bottom), float(mb.right), float(mb.top)
     width, height = right - left, top - bottom
     return [
-        (left, bottom + height/2, left + width/2, top),           # topo-esq
-        (left + width/2, bottom + height/2, right, top),          # topo-dir
-        (left, bottom, left + width/2, bottom + height/2),        # baixo-esq
-        (left + width/2, bottom, right, bottom + height/2),       # baixo-dir
+        (left, bottom + height/2, left + width/2, top),
+        (left + width/2, bottom + height/2, right, top),
+        (left, bottom, left + width/2, bottom + height/2),
+        (left + width/2, bottom, right, bottom + height/2),
     ]
 
 # ======= BLANK CHECK (raster) =======
@@ -272,7 +227,6 @@ def quad_is_blank_by_raster(doc: fitz.Document, page_index: int, clip_rect: fitz
 # ======= OVERLAY (reportlab) =======
 def make_overlay_pdf(w_pt: float, h_pt: float, products: list[str],
                      height_pct=OVERLAY_HEIGHT_PCT, margin_x=OVERLAY_MARGIN_X, font_size=FONT_SIZE) -> bytes:
-    """Cria uma página PDF só com o rodapé de produtos, do mesmo tamanho da etiqueta."""
     buf = io.BytesIO()
     canv = canvas.Canvas(buf, pagesize=portrait((w_pt, h_pt)))
     area_h = h_pt * height_pct
@@ -288,8 +242,7 @@ def make_overlay_pdf(w_pt: float, h_pt: float, products: list[str],
     line_h = font_size + 2
     for ln in products[:MAX_LINES]:
         y -= line_h
-        if y < pad_y + 2:
-            break
+        if y < pad_y + 2: break
         canv.drawString(x0, y, f"• {ln}")
 
     canv.showPage()
@@ -299,52 +252,48 @@ def make_overlay_pdf(w_pt: float, h_pt: float, products: list[str],
 
 # ======= PIPELINE =======
 def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
-    """
-    - classifica quadrantes de cada página em: ETIQUETA ou LISTA (por texto)
-    - extrai PEDIDO de ambos (corrigindo IDs quebrados)
-    - imprime produtos da LISTA no rodapé da ETIQUETA de mesmo PEDIDO
-    """
     reader = PdfReader(io.BytesIO(pdf_bytes))
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    labels = []    # {page_idx, q_idx, pypdf_box, fitz_rect, order}
-    picklist = []  # {page_idx, q_idx, pypdf_box, fitz_rect, order, products}
+    labels = []   # {page_idx,q_idx,pypdf_box,fitz_rect,order}
+    picks  = []   # {page_idx,q_idx,pypdf_box,fitz_rect,order,products}
 
     for i in range(len(doc)):
-        page_fitz = doc[i]
-        page_text = page_fitz.get_text("text")
-        page_is_pick = is_picklist_page_text(page_text)
+        p_fitz = doc[i]
+        page_text = p_fitz.get_text("text")
+        page_is_pick  = is_picklist_page_text(page_text)
         page_is_label = is_label_page_text(page_text)
 
-        qf = quadrants_fitz(page_fitz.rect)
+        qf = quadrants_fitz(p_fitz.rect)
         qp = quadrants_pypdf(reader.pages[i].mediabox)
 
         for q_idx, (rect_fitz, box_pdf) in enumerate(zip(qf, qp)):
-            quad_text = page_fitz.get_text("text", clip=rect_fitz) or ""
-
-            # filtra quadrantes vazios (apenas para etiquetas)
-            if REMOVE_BLANK and not page_is_pick:
-                if quad_is_blank_by_raster(doc, i, rect_fitz):
-                    continue
-
-            order = pick_best_order(quad_text)
+            quad_text = p_fitz.get_text("text", clip=rect_fitz) or ""
 
             if page_is_pick:
-                prods = extract_products_from_picklist(quad_text)
-                picklist.append({
-                    "page_idx": i, "q_idx": q_idx, "fitz_rect": rect_fitz,
-                    "pypdf_box": box_pdf, "order": order, "products": prods
-                })
-            elif page_is_label or order:
-                labels.append({
-                    "page_idx": i, "q_idx": q_idx, "fitz_rect": rect_fitz,
-                    "pypdf_box": box_pdf, "order": order
-                })
+                order = extract_order_from_picklist_quad(quad_text)
+                products = extract_products_from_picklist(quad_text) if order else []
+                if order:
+                    picks.append({"page_idx": i, "q_idx": q_idx, "fitz_rect": rect_fitz,
+                                  "pypdf_box": box_pdf, "order": order, "products": products})
+            elif page_is_label:
+                # remove quadrantes vazios
+                if REMOVE_BLANK and quad_is_blank_by_raster(doc, i, rect_fitz):
+                    continue
+                # order será preenchido depois com base no set permitido (dos picks)
+                labels.append({"page_idx": i, "q_idx": q_idx, "fitz_rect": rect_fitz,
+                               "pypdf_box": box_pdf, "order": ""})
 
-    # indexa listas por pedido (usa a primeira com produtos não vazios)
+    allowed_orders = {p["order"] for p in picks}
+    # agora preenche o order das etiquetas com base nos tokens que existem nas picklists
+    for lab in labels:
+        qt = doc[lab["page_idx"]].get_text("text", clip=lab["fitz_rect"]) or ""
+        lab["order"] = extract_order_from_label_quad(qt, allowed_orders)
+
+    # indexa listas por pedido
     pick_by_order = {}
-    for pk in picklist:
-        if pk["order"] and pk.get("products"):
+    for pk in picks:
+        if pk.get("products"):
             pick_by_order.setdefault(pk["order"], []).append(pk)
 
     writer = PdfWriter()
@@ -363,10 +312,7 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
                 h_pt = float(p.mediabox.top) - float(p.mediabox.bottom)
                 overlay_bytes = make_overlay_pdf(w_pt, h_pt, pk["products"])
                 ov_page = PdfReader(io.BytesIO(overlay_bytes)).pages[0]
-                try:
-                    p.merge_page(ov_page)
-                except Exception:
-                    p.merge_page(ov_page)
+                p.merge_page(ov_page)
 
         writer.add_page(p)
 
@@ -382,7 +328,7 @@ if uploaded_file is not None:
         with st.spinner("Processando e vinculando pelo PEDIDO..."):
             pdf_bytes_out = process_pdf_with_picklist(pdf_bytes_in)
 
-        st.success("Pronto! Uma etiqueta por cliente, com produtos da Lista no rodapé.")
+        st.success("Pronto! Uma etiqueta por cliente, com a lista (produtos) no rodapé.")
         st.download_button(
             label="Baixar PDF final",
             data=pdf_bytes_out,

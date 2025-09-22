@@ -214,33 +214,31 @@ def extract_rows_numbered(text: str) -> list[str]:
 
 def extract_products_from_quad(text: str) -> list[str]:
     """
-    Heurística conservadora p/ detectar LISTA:
-    - não conter palavras típicas de etiqueta;
-    - ter pelo menos 1 SKU (letras+números) OU ter linhas numeradas;
-    - se possível, usar linhas 1,2,3… para agrupar itens.
-    Retorna linhas "2× Nome — SKU".
+    Detecta LISTA de separação e extrai:
+      - QNT (QNT/QTD/QTDE/Quantidade, '2x', 'x2', '2 UN'...)
+      - SKU (valor após 'SKU:')
+      - Variação (opcional)
+    Retorna linhas ASCII: '- 2x SKU-123 (VAR: XYZ)'.
     """
     raw = norm_heavy(text)
     s = raw.lower()
     if any(w in s for w in EXCLUDE_LABEL_WORDS):
         return []
 
-    # tenta agrupar por linhas numeradas (mais estável no PDF da Shopee)
+    # segmenta itens por linhas numeradas (1,2,3...) — funciona bem no PDF da Shopee
     rows = extract_rows_numbered(text)
     if not rows:
-        # fallback: sem linhas numeradas, usa linhas soltas
         rows = [ln.strip() for ln in raw.splitlines() if ln.strip()]
 
-    # verificação mínima de “parece lista”: ter ao menos 1 SKU OU 2 linhas com palavras
-    sku_count = sum(len([t for t in SKU_TOKEN_RE.findall(r) if not t.startswith("BR")]) for r in rows)
-    if sku_count < 1 and len(rows) < 2:
+    # precisa ter pelo menos 1 SKU real (letras+números) no bloco todo
+    if sum(len([t for t in SKU_TOKEN_RE.findall(r) if not t.startswith("BR")]) for r in rows) < 1:
         return []
 
     items = []
     for row in rows:
         base = norm_heavy(row)
 
-        # qty
+        # QNT
         qty = None
         for p in QTY_PATTS:
             m = p.search(base)
@@ -249,16 +247,15 @@ def extract_products_from_quad(text: str) -> list[str]:
                     qty = int(m.group(1)); break
                 except: pass
         if qty is None:
-            # se não achar QNT explícita, tenta último número pequeno perto do fim
-            tail_nums = re.findall(r"(\d{1,3})(?!\d)", base[-20:])
-            if tail_nums:
-                try: qty = int(tail_nums[-1])
-                except: qty = 1
+            # tenta '2x' ou 'x2'
+            m = re.search(r"\b(\d{1,3})\s*x\b|\bx\s*(\d{1,3})\b", base, re.I)
+            if m:
+                qty = int(m.group(1) or m.group(2))
         if qty is None: qty = 1
 
-        # sku
+        # SKU (valor depois de 'SKU:')
         sku = None
-        msku = re.search(r"S\s*K\s*U[:\s\-]*([A-Z0-9\s\-]{4,})", base, re.I)
+        msku = re.search(r"\bS\s*K\s*U[:\s\-]*([A-Z0-9\s\-\/\.]{4,})", base, re.I)
         if msku:
             cand = re.sub(r"\s+", "", msku.group(1))
             mt = SKU_TOKEN_RE.search(cand)
@@ -267,25 +264,36 @@ def extract_products_from_quad(text: str) -> list[str]:
             toks = [t for t in SKU_TOKEN_RE.findall(base) if not t.startswith("BR")]
             if toks: sku = toks[-1]
 
-        # nome (antes de QNT/SKU)
+        # Variação (opcional)
+        var = None
+        mvar = re.search(r"\bVARIA(?:C|Ç)A?O[:\s\-]*([A-Z0-9 /\-\.]{2,})", base, re.I)
+        if mvar:
+            var = re.sub(r"\s{2,}.*$", "", mvar.group(1)).strip()
+
+        # Nome (apenas fallback se não tiver SKU)
         name = base
         cut = min([pos for pos in [
-            name.lower().find(" qnt"), name.lower().find(" qtd"), name.lower().find(" qtde"),
-            name.lower().find(" quantidade"), name.lower().find(" sku")
+            name.lower().find(" sku"), name.lower().find(" qnt"), name.lower().find(" qtd"),
+            name.lower().find(" qtde"), name.lower().find(" quantidade"), name.lower().find(" varia")
         ] if pos >= 0] or [len(name)])
         name = re.sub(r"^\s*\d+\s*[-.)]\s*", "", name[:cut]).strip(" -•–:;")
 
-        line = f"{qty}× {name}" + (f" — {sku}" if sku else "")
+        if not sku and not name:
+            continue
+
+        core = f"{qty}x {sku or name}"
+        if var:
+            core += f" (VAR: {var})"
+        line = f"- {core}"
+        # limpa e limita
         line = re.sub(r"\s+", " ", line).strip()
         if line and line not in items:
             items.append(line[:110] + ("..." if len(line) > 110 else ""))
         if len(items) >= MAX_LINES:
             break
 
-    # se nada decente, não trata como lista
-    if not items:
-        return []
     return items
+
 
 # =============== PIPELINE ===============
 def process_pdf(pdf_bytes: bytes, show_diag: bool = False):

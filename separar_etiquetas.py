@@ -5,29 +5,25 @@ from copy import deepcopy
 from pathlib import Path
 import base64, io, re, unicodedata
 
-# libs para raster/overlay
+# raster/overlay
 import fitz  # PyMuPDF
 from PIL import Image
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import portrait
 
 # ================== PAGE CONFIG ==================
-st.set_page_config(page_title="Separador de Etiquetas", layout="wide")
+st.set_page_config(page_title="Etiquetas 4→1 + Lista de Separação no Rodapé", layout="wide")
 
 # ================== HIDE STREAMLIT BRANDING ==================
-st.markdown(
-    """
-    <style>
-    #MainMenu, footer {visibility: hidden;}
-    header, [data-testid="stToolbar"], [data-testid="stDecoration"], .stDeployButton {display: none !important;}
-    div[class^="viewerBadge"], div[class*="viewerBadge"] {display: none !important;}
-    [data-testid="stAppViewContainer"] a[href*="streamlit.io"] {display: none !important;}
-    a[href*="streamlit.io"][style*="position: fixed"],
-    a[href*="streamlit.app"][style*="position: fixed"] {display: none !important;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+#MainMenu, footer {visibility: hidden;}
+header, [data-testid="stToolbar"], [data-testid="stDecoration"], .stDeployButton {display: none !important;}
+div[class^="viewerBadge"], div[class*="viewerBadge"] {display: none !important;}
+[data-testid="stAppViewContainer"] a[href*="streamlit.io"] {display: none !important;}
+a[href*="streamlit.io"][style*="position: fixed"], a[href*="streamlit.app"][style*="position: fixed"] {display: none !important;}
+</style>
+""", unsafe_allow_html=True)
 
 # ================== HEADER (logo por tema) ==================
 BASE_DIR = Path(__file__).parent
@@ -44,8 +40,7 @@ def show_logo_center(width_px: int = 480):
         st.markdown(
             f"""
             <div style="text-align:center;">
-              <img src="data:image/png;base64,{b64}"
-                   style="display:block;margin:0 auto;width:{width_px}px;" />
+              <img src="data:image/png;base64,{b64}" style="display:block;margin:0 auto;width:{width_px}px;" />
             </div>
             """,
             unsafe_allow_html=True,
@@ -57,50 +52,57 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    "<p style='text-align:center;margin-top:0.25rem;'>Lê o PDF único da Shopee, encontra o <b>PEDIDO</b> e imprime os <b>produtos</b> da lista de separação no rodapé da etiqueta correspondente.</p>",
+    "<p style='text-align:center;margin-top:0.25rem;'>PDF único da Shopee: casamos cada <b>Etiqueta</b> com a <b>Lista de Separação</b> pelo <b>PEDIDO</b> e imprimimos os <b>produtos</b> no rodapé da etiqueta.</p>",
     unsafe_allow_html=True,
 )
 
 st.divider()
 
-# ================== UPLOADER STYLE (500px + verde) ==================
-st.markdown(
-    """
-    <style>
-    div[data-testid="stFileUploader"] > label { font-weight: 600; }
-    div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]{
-        width: 500px !important;
-        max-width: 100%;
-        margin: 0 auto !important;
-        border-radius: 12px;
-        background-color: #16A34A !important;
-        border: 2px dashed rgba(255,255,255,0.6);
-        padding: 1.25rem;
-    }
-    div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"] *{
-        color: #FFFFFF !important;
-    }
-    div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:hover{
-        background-color: #15803D !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ================== ESTILO DO UPLOADER (500px + VERDE) ==================
+st.markdown("""
+<style>
+div[data-testid="stFileUploader"] > label { font-weight: 600; }
+div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]{
+    width: 500px !important;
+    max-width: 100%;
+    margin: 0 auto !important;
+    border-radius: 12px;
+    background-color: #16A34A !important;
+    border: 2px dashed rgba(255,255,255,0.6);
+    padding: 1.25rem;
+}
+div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"] *{
+    color: #FFFFFF !important;
+}
+div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:hover{
+    background-color: #15803D !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ================== INPUT ==================
 uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")
 
 # ====== CONSTANTES ======
+# limpeza de quadrantes vazios (após crop 4→1)
 REMOVE_BLANK   = True
 DPI_CHECK      = 120
 WHITE_THRESH   = 245
 COVERAGE       = 0.995   # 99,5% de branco = vazio
 
-OVERLAY_HEIGHT_PCT = 0.16  # faixa inferior para os produtos
+# rodapé (onde imprimir os produtos)
+OVERLAY_HEIGHT_PCT = 0.16  # 16% da altura (ajuste fino se cobrir barra)
 OVERLAY_MARGIN_X   = 18
 FONT_SIZE          = 7
 MAX_LINES          = 4
+
+# ====== PALAVRAS-CHAVE (ajustadas ao seu PDF)
+# etiquetas (ex.: "DANFE SIMPLIFICADO - ETIQUETA")
+LABEL_HINTS = ["danfe", "etiqueta", "destinatário", "remetente"]
+# listas de separação (no seu arquivo aparecem estes termos)
+PICKLIST_HINTS = [
+    "checklist de carregamento", "produto", "variação", "qnt", "sku", "id pedido", "corte aqui"
+]
 
 # ====== UTILS ======
 def normalize_txt(t: str) -> str:
@@ -108,47 +110,130 @@ def normalize_txt(t: str) -> str:
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", t).strip()
 
-# Pedido: pega por palavra-chave; fallback: tokens longos alfanum/hífen (evitando CEP/telefone)
-ORDER_RE = re.compile(r"(?:pedido|id do pedido|order(?: id)?|ordem)\s*[:#-]?\s*([A-Z0-9\-]{6,})", re.I)
-TOKEN_RE = re.compile(r"\b[A-Z0-9\-]{8,}\b")
+def is_picklist_page_text(page_text: str) -> bool:
+    t = normalize_txt(page_text).lower()
+    hit = 0
+    for k in PICKLIST_HINTS:
+        if k in t:
+            hit += 1
+    return hit >= 2  # exige pelo menos 2 sinais da lista
 
-def extract_order(text: str) -> str:
-    raw = normalize_txt(text).upper()
-    m = ORDER_RE.search(raw)
-    if m:
-        oid = m.group(1)
-        # normaliza
-        oid = re.sub(r"[^A-Z0-9\-]", "", oid)
-        return oid
-    # fallback: tenta maior token (evita pegar CEP/telefone por tamanho/formato)
-    candidates = [tok for tok in TOKEN_RE.findall(raw) if not re.fullmatch(r"\d{8,}", tok)]
-    if candidates:
-        candidates.sort(key=len, reverse=True)
-        return candidates[0]
-    return ""
+def is_label_page_text(page_text: str) -> bool:
+    t = normalize_txt(page_text).lower()
+    return any(k in t for k in LABEL_HINTS)
+
+# ——— PEDIDO ———
+# Regex principal: “Pedido: XXXXX” ou “ID Pedido XXXXX”
+ORDER_NEAR_RE = re.compile(r"(?:pedido|id\s*pedido)[:\s#-]*([A-Z0-9\-\s]{8,})", re.I)
+
+def extract_order_candidates(text: str) -> list[str]:
+    """
+    Extrai possíveis IDs de pedido mesmo que estejam quebrados (ex.: '25 09 17 NM 75 ND 5E').
+    1) Prioriza captura perto de 'Pedido' / 'ID Pedido'.
+    2) Se nada encontrado, procura tokens alfanum longos no texto todo.
+    """
+    up = text.upper()
+    cands = []
+
+    # 1) Perto de "Pedido" / "ID Pedido"
+    for m in ORDER_NEAR_RE.finditer(up):
+        raw = m.group(1)
+        token = re.sub(r"[^A-Z0-9]", "", raw)
+        if 10 <= len(token) <= 24 and not token.startswith("BR") and not token.isdigit():
+            cands.append(token)
+
+    # 2) Varredura geral (captura sequências alfanum longas, removendo espaços/hífens)
+    for m in re.finditer(r"([A-Z0-9][A-Z0-9\-\s]{10,24})", up):
+        token = re.sub(r"[^A-Z0-9]", "", m.group(1))
+        if 10 <= len(token) <= 24 and not token.startswith("BR") and not token.isdigit():
+            cands.append(token)
+
+    # ordena pela maior probabilidade (tamanho maior primeiro) e deduplica
+    uniq = []
+    seen = set()
+    for tk in sorted(cands, key=len, reverse=True):
+        if tk not in seen:
+            uniq.append(tk)
+            seen.add(tk)
+    return uniq
+
+def pick_best_order(text: str) -> str:
+    cands = extract_order_candidates(text)
+    return cands[0] if cands else ""
+
+# ——— PRODUTOS (a partir da lista de separação) ———
+STOP_WORDS = ["checklist de carregamento", "id pedido", "corte aqui"]
 
 def extract_products_from_picklist(text: str) -> list[str]:
     """
-    Extrai linhas de produtos da 'lista de separação'.
-    Regras: ignora campos de endereço/assinatura e mantém linhas com letras.
+    Heurística para pegar as linhas de produto:
+    - começa após detectar cabeçalho 'Produto' / 'Variação' / 'Qnt' / 'SKU'
+    - junta quebras de linha em descrições longas
+    - para ao encontrar blocos finais (checklist/id pedido/corte aqui)
     """
-    lines = [ln.strip(" •-:") for ln in text.splitlines()]
-    clean = []
-    for ln in lines:
-        l = normalize_txt(ln)
-        if len(l) < 2:
-            continue
-        low = l.lower()
-        if any(k in low for k in ["cpf", "cnpj", "assin", "declaro", "remetente", "destinatario", "destinatário", "endereco", "endereço"]):
-            continue
-        if re.search(r"[a-zA-Z]", l):
-            # corta linhas muito compridas
-            if len(l) > 80:
-                l = l[:77] + "..."
-            clean.append(l)
-    # mantém as primeiras relevantes
-    return clean[:MAX_LINES]
+    lines = [ln.strip() for ln in text.splitlines()]
+    started = False
+    items = []
+    cur = ""
 
+    def push_current():
+        nonlocal cur
+        t = normalize_txt(cur)
+        if len(t) >= 2 and re.search(r"[A-Za-z]", t):
+            if len(t) > 90:
+                t = t[:87] + "..."
+            items.append(t)
+        cur = ""
+
+    for raw in lines:
+        low = normalize_txt(raw).lower()
+
+        if any(s in low for s in STOP_WORDS):
+            # fim da área útil
+            break
+
+        # detectar cabeçalho
+        if not started:
+            if ("produto" in low and "qnt" in low) or ("variação" in low) or ("variacao" in low):
+                started = True
+            continue
+
+        # já estamos na área de itens
+        if re.match(r"^\s*\d+\s*$", low):
+            # números de linha sozinhos: ignora
+            continue
+
+        # nova linha de item quando começa com número+espaço ou quando a linha é longa
+        if re.match(r"^\s*\d+\s", raw) or (len(cur) > 0 and len(raw) > 40):
+            if cur:
+                push_current()
+            cur = raw
+        else:
+            # apenda fragmentos (descrições quebradas)
+            sep = " " if cur else ""
+            cur = f"{cur}{sep}{raw}"
+
+        if len(items) >= MAX_LINES:
+            break
+
+    if cur and len(items) < MAX_LINES:
+        push_current()
+
+    # fallback: se nada capturado, pegue as 3-4 primeiras linhas “ricas”
+    if not items:
+        rough = []
+        for ln in lines:
+            l = normalize_txt(ln)
+            if any(s in l.lower() for s in STOP_WORDS):
+                break
+            if len(l) > 3 and re.search(r"[A-Za-z]", l):
+                rough.append(l if len(l) <= 90 else l[:87] + "...")
+            if len(rough) >= MAX_LINES:
+                break
+        items = rough
+    return items[:MAX_LINES]
+
+# ======= QUADRANTES =======
 def quadrants_fitz(rect: fitz.Rect):
     W, H = rect.width, rect.height
     return [
@@ -168,6 +253,7 @@ def quadrants_pypdf(mb):
         (left + width/2, bottom, right, bottom + height/2),       # baixo-dir
     ]
 
+# ======= BLANK CHECK (raster) =======
 def quad_is_blank_by_raster(doc: fitz.Document, page_index: int, clip_rect: fitz.Rect,
                             dpi: int = DPI_CHECK, white_thresh: int = WHITE_THRESH, coverage: float = COVERAGE) -> bool:
     p = doc[page_index]
@@ -183,6 +269,7 @@ def quad_is_blank_by_raster(doc: fitz.Document, page_index: int, clip_rect: fitz
     frac_white = white_pixels / max(total, 1)
     return frac_white >= coverage
 
+# ======= OVERLAY (reportlab) =======
 def make_overlay_pdf(w_pt: float, h_pt: float, products: list[str],
                      height_pct=OVERLAY_HEIGHT_PCT, margin_x=OVERLAY_MARGIN_X, font_size=FONT_SIZE) -> bytes:
     """Cria uma página PDF só com o rodapé de produtos, do mesmo tamanho da etiqueta."""
@@ -211,60 +298,58 @@ def make_overlay_pdf(w_pt: float, h_pt: float, products: list[str],
     return buf.getvalue()
 
 # ======= PIPELINE =======
-PICKLIST_KEYWORDS = ["lista de separacao", "lista de separação", "separacao", "separação", "picking", "itens do pedido", "lista"]
-
 def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
     """
-    - separa quadrantes (4→1) tanto de etiquetas quanto das listas de separação
-    - extrai PEDIDO de ambos
-    - cria overlay dos produtos da lista no rodapé da etiqueta com mesmo PEDIDO
+    - classifica quadrantes de cada página em: ETIQUETA ou LISTA (por texto)
+    - extrai PEDIDO de ambos (corrigindo IDs quebrados)
+    - imprime produtos da LISTA no rodapé da ETIQUETA de mesmo PEDIDO
     """
-    reader_full = PdfReader(io.BytesIO(pdf_bytes))
+    reader = PdfReader(io.BytesIO(pdf_bytes))
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    labels = []   # itens com: order, fitz_rect, pypdf_box, page_idx, q_idx
-    pickls = []   # idem, com products
+    labels = []    # {page_idx, q_idx, pypdf_box, fitz_rect, order}
+    picklist = []  # {page_idx, q_idx, pypdf_box, fitz_rect, order, products}
 
     for i in range(len(doc)):
-        p_fitz = doc[i]
-        page_text = normalize_txt(p_fitz.get_text("text").lower())
-        is_pick = any(k in page_text for k in PICKLIST_KEYWORDS)
+        page_fitz = doc[i]
+        page_text = page_fitz.get_text("text")
+        page_is_pick = is_picklist_page_text(page_text)
+        page_is_label = is_label_page_text(page_text)
 
-        qf = quadrants_fitz(p_fitz.rect)
-        qp = quadrants_pypdf(reader_full.pages[i].mediabox)
+        qf = quadrants_fitz(page_fitz.rect)
+        qp = quadrants_pypdf(reader.pages[i].mediabox)
 
         for q_idx, (rect_fitz, box_pdf) in enumerate(zip(qf, qp)):
-            quad_text = p_fitz.get_text("text", clip=rect_fitz) or ""
-            if REMOVE_BLANK and not is_pick:
+            quad_text = page_fitz.get_text("text", clip=rect_fitz) or ""
+
+            # filtra quadrantes vazios (apenas para etiquetas)
+            if REMOVE_BLANK and not page_is_pick:
                 if quad_is_blank_by_raster(doc, i, rect_fitz):
                     continue
 
-            order_id = extract_order(quad_text)
-            item = {
-                "page_idx": i,
-                "q_idx": q_idx,
-                "fitz_rect": rect_fitz,
-                "pypdf_box": box_pdf,
-                "order": order_id,
-                "text": quad_text,
-            }
+            order = pick_best_order(quad_text)
 
-            if is_pick:
-                products = extract_products_from_picklist(quad_text)
-                item["products"] = products
-                pickls.append(item)
-            else:
-                labels.append(item)
+            if page_is_pick:
+                prods = extract_products_from_picklist(quad_text)
+                picklist.append({
+                    "page_idx": i, "q_idx": q_idx, "fitz_rect": rect_fitz,
+                    "pypdf_box": box_pdf, "order": order, "products": prods
+                })
+            elif page_is_label or order:
+                labels.append({
+                    "page_idx": i, "q_idx": q_idx, "fitz_rect": rect_fitz,
+                    "pypdf_box": box_pdf, "order": order
+                })
 
-    # indexa listas por pedido (pode haver mais de uma; usa a primeira com produtos)
+    # indexa listas por pedido (usa a primeira com produtos não vazios)
     pick_by_order = {}
-    for p in pickls:
-        if p["order"] and p.get("products"):
-            pick_by_order.setdefault(p["order"], []).append(p)
+    for pk in picklist:
+        if pk["order"] and pk.get("products"):
+            pick_by_order.setdefault(pk["order"], []).append(pk)
 
     writer = PdfWriter()
     for lab in labels:
-        p_src = reader_full.pages[lab["page_idx"]]
+        p_src = reader.pages[lab["page_idx"]]
         x0, y0, x1, y1 = lab["pypdf_box"]
         p = deepcopy(p_src)
         rect = RectangleObject([x0, y0, x1, y1])
@@ -272,12 +357,11 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
         p.mediabox = rect
 
         if lab["order"] and lab["order"] in pick_by_order:
-            # usa a primeira lista disponível para esse pedido
-            dec = pick_by_order[lab["order"]][0]
-            if dec.get("products"):
+            pk = pick_by_order[lab["order"]][0]
+            if pk.get("products"):
                 w_pt = float(p.mediabox.right) - float(p.mediabox.left)
                 h_pt = float(p.mediabox.top) - float(p.mediabox.bottom)
-                overlay_bytes = make_overlay_pdf(w_pt, h_pt, dec["products"])
+                overlay_bytes = make_overlay_pdf(w_pt, h_pt, pk["products"])
                 ov_page = PdfReader(io.BytesIO(overlay_bytes)).pages[0]
                 try:
                     p.merge_page(ov_page)
@@ -295,10 +379,10 @@ def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
 if uploaded_file is not None:
     try:
         pdf_bytes_in = uploaded_file.getvalue()
-        with st.spinner("Processando e vinculando listas pelo PEDIDO..."):
+        with st.spinner("Processando e vinculando pelo PEDIDO..."):
             pdf_bytes_out = process_pdf_with_picklist(pdf_bytes_in)
 
-        st.success("Pronto! Uma etiqueta por cliente com a lista (produtos) no rodapé.")
+        st.success("Pronto! Uma etiqueta por cliente, com produtos da Lista no rodapé.")
         st.download_button(
             label="Baixar PDF final",
             data=pdf_bytes_out,
@@ -310,20 +394,17 @@ if uploaded_file is not None:
         st.error("Não foi possível processar o arquivo. Verifique se é um PDF válido.")
         st.exception(e)
 else:
-    # centraliza o aviso
-    st.markdown(
-        """
-        <style>
-        .info-centered [data-testid="stAlert"]{
-            width: 500px !important;
-            max-width: 100% !important;
-            margin: 0 auto !important;
-            border-radius: 12px;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    # aviso centralizado
+    st.markdown("""
+    <style>
+    .info-centered [data-testid="stAlert"]{
+        width: 500px !important;
+        max-width: 100% !important;
+        margin: 0 auto !important;
+        border-radius: 12px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
     st.markdown('<div class="info-centered">', unsafe_allow_html=True)
     st.info("Faça o upload de um PDF para iniciar o processamento.")
     st.markdown('</div>', unsafe_allow_html=True)

@@ -5,14 +5,12 @@ from copy import deepcopy
 from pathlib import Path
 import base64, io, re, unicodedata
 
-# raster/overlay
+# ---- raster / desenho direto no PDF (sem merge) ----
 import fitz  # PyMuPDF
 from PIL import Image
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import portrait
 
-# ================== PAGE CONFIG ==================
-st.set_page_config(page_title="Etiquetas 4→1 + Lista (produtos) no rodapé", layout="wide")
+# ================== CONFIG ==================
+st.set_page_config(page_title="Etiquetas 4→1 + Lista no rodapé (estável)", layout="wide")
 
 # ================== HIDE STREAMLIT BRANDING ==================
 st.markdown("""
@@ -25,7 +23,7 @@ a[href*="streamlit.io"][style*="position: fixed"], a[href*="streamlit.app"][styl
 </style>
 """, unsafe_allow_html=True)
 
-# ================== HEADER (logo por tema) ==================
+# ================== LOGO ==================
 BASE_DIR = Path(__file__).parent
 LOGO_LIGHT = BASE_DIR / "logo_light.png"
 LOGO_DARK  = BASE_DIR / "logo_dark.png"
@@ -52,13 +50,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    "<p style='text-align:center;margin-top:0.25rem;'>1 etiqueta por cliente, pareada pelo <b>PEDIDO</b>, e as linhas de <b>produtos</b> da lista no rodapé.</p>",
+    "<p style='text-align:center;margin-top:0.25rem;'>Pareamento pelo <b>PEDIDO</b>. Texto dos <b>produtos</b> é escrito diretamente no rodapé da etiqueta (sem mesclar PDFs).</p>",
     unsafe_allow_html=True,
 )
 
 st.divider()
 
-# ================== ESTILO DO UPLOADER (500px + VERDE) ==================
+# ================== UPLOADER (500px + verde) ==================
 st.markdown("""
 <style>
 div[data-testid="stFileUploader"] > label { font-weight: 600; }
@@ -80,25 +78,26 @@ div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:
 </style>
 """, unsafe_allow_html=True)
 
-# ================== INPUT ==================
-uploaded_file = st.file_uploader("Selecione o PDF", type=["pdf"], key="uploader_main")
+uploaded_file = st.file_uploader("Selecione o PDF da Shopee (etiquetas + lista)", type=["pdf"], key="uploader_main")
 
-# ====== CONSTANTES ======
+# ================== CONSTANTES ==================
+# limpeza de quadrantes vazios
 REMOVE_BLANK   = True
 DPI_CHECK      = 120
 WHITE_THRESH   = 245
 COVERAGE       = 0.995   # 99,5% branco = vazio
 
+# rodapé (onde imprimir os produtos)
 OVERLAY_HEIGHT_PCT = 0.14  # 14% da altura da etiqueta
 OVERLAY_MARGIN_X   = 18
 FONT_SIZE          = 7
 MAX_LINES          = 4
 
-# ====== PALAVRAS-CHAVE ======
+# palavras-chave
 PICKLIST_HINTS = ["checklist de carregamento", "produto", "variação", "variacao", "qnt", "sku", "id pedido", "corte aqui"]
 LABEL_HINTS    = ["danfe", "etiqueta", "destinatário", "destinatario", "remetente"]
 
-# ====== HELPERS ======
+# ================== HELPERS ==================
 def normalize_txt(t: str) -> str:
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
@@ -114,20 +113,19 @@ def is_label_page_text(page_text: str) -> bool:
 
 # ====== PEDIDO ======
 def extract_order_from_picklist_quad(text: str) -> str:
-    """Tenta pegar o token imediatamente antes de 'package' (variações case-insensitive)."""
+    """Tenta pegar o token imediatamente antes de 'PACKAGE' ou próximo de 'ID Pedido'."""
     up = text.upper()
     m = re.search(r"([A-Z0-9]{10,24})\s+PACKAGE\b", up)
     if m:
         tok = m.group(1)
         if not tok.startswith("BR") and re.search(r"[A-Z]", tok) and re.search(r"\d", tok):
             return tok
-    # fallback: perto de 'ID Pedido'
     m2 = re.search(r"ID\s*PEDIDO[^A-Z0-9]{0,20}([A-Z0-9]{10,24})", up)
     if m2:
         tok = re.sub(r"[^A-Z0-9]","", m2.group(1))
         if not tok.startswith("BR") and re.search(r"[A-Z]", tok) and re.search(r"\d", tok):
             return tok
-    # fallback 2: maior token alfanum sem BR
+    # fallback seguro: maior token alfanum sem BR
     for m3 in re.finditer(r"\b[A-Z0-9]{10,24}\b", up):
         tok = m3.group(0)
         if tok.startswith("BR"): 
@@ -137,7 +135,7 @@ def extract_order_from_picklist_quad(text: str) -> str:
     return ""
 
 def extract_order_from_label_quad(text: str, allowed_set: set[str]) -> str:
-    """Só aceita tokens que existam entre os PEDIDOS das listas (evita pegar NF/CEP)."""
+    """Na etiqueta só aceitamos tokens que aparecem nas picklists (evita CEP/NF)."""
     up = text.upper()
     cands = []
     for m in re.finditer(r"\b([A-Z0-9]{10,24})\b", up):
@@ -167,10 +165,8 @@ def extract_products_from_picklist(text: str) -> list[str]:
     def is_header_line(line_low: str) -> bool:
         if any(p.match(line_low) for p in HEADER_PATTERNS):
             return True
-        # linhas tipo "Produto  Variação  Qnt  SKU" com múltiplos espaços
-        if ("produto" in line_low and "qnt" in line_low and "sku" in line_low):
-            # se for curto, é cabeçalho
-            return len(line_low) <= 40
+        if ("produto" in line_low and "qnt" in line_low and "sku" in line_low) and len(line_low) <= 60:
+            return True
         return False
 
     def push():
@@ -191,15 +187,11 @@ def extract_products_from_picklist(text: str) -> list[str]:
                 started = True
             continue
 
-        # ignora linhas de cabeçalho que eventualmente reaparecem
         if is_header_line(low):
             continue
-
         if re.match(r"^\s*\d+\s*$", low):
-            # numeração isolada
             continue
 
-        # quebra de item
         if re.match(r"^\s*\d+\s", raw) or (len(cur) > 0 and len(raw) > 40):
             if cur:
                 push()
@@ -213,7 +205,6 @@ def extract_products_from_picklist(text: str) -> list[str]:
     if cur and len(items) < MAX_LINES:
         push()
 
-    # fallback: primeiras linhas ricas de texto se não achou nada
     if not items:
         for ln in lines:
             l = normalize_txt(ln)
@@ -260,121 +251,128 @@ def quad_is_blank_by_raster(doc: fitz.Document, page_index: int, clip_rect: fitz
     frac_white = white_pixels / max(total, 1)
     return frac_white >= coverage
 
-# ======= OVERLAY (reportlab) =======
-def make_overlay_pdf(w_pt: float, h_pt: float, products: list[str],
-                     height_pct=OVERLAY_HEIGHT_PCT, margin_x=OVERLAY_MARGIN_X, font_size=FONT_SIZE) -> bytes:
-    buf = io.BytesIO()
-    canv = canvas.Canvas(buf, pagesize=portrait((w_pt, h_pt)))
-    area_h = h_pt * height_pct
-    pad_y = 4
-    y0 = pad_y + area_h - font_size - 2
-    x0 = margin_x
-
-    canv.setFont("Helvetica-Bold", font_size)
-    canv.drawString(x0, y0 + 6, "Produtos:")
-    y = y0 - 2
-
-    canv.setFont("Helvetica", font_size)
-    line_h = font_size + 2
-    for ln in products[:MAX_LINES]:
-        y -= line_h
-        if y < pad_y + 2: break
-        canv.drawString(x0, y, f"• {ln}")
-
-    canv.showPage()
-    canv.save()
-    buf.seek(0)
-    return buf.getvalue()
-
-# ======= PIPELINE =======
+# ================== PIPELINE ==================
 def process_pdf_with_picklist(pdf_bytes: bytes) -> bytes:
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    """
+    1) Extrai todos os PEDIDOS + produtos a partir das páginas de 'lista de separação'
+    2) Seleciona 1 etiqueta por PEDIDO (dedup), cortando 4→1 com pypdf
+    3) Escreve (com PyMuPDF) o rodapé de produtos diretamente nas páginas finais
+    """
+    # Abrimos o PDF completo com as duas libs
+    reader_full = PdfReader(io.BytesIO(pdf_bytes))
+    doc_full = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    # Coleta
-    pick_by_order = {}   # order -> set/list de produtos
-    labels_by_order = {} # order -> dados da etiqueta (primeira ocorrência)
-
-    for i in range(len(doc)):
-        p_fitz = doc[i]
-        page_text = p_fitz.get_text("text")
-        page_is_pick  = is_picklist_page_text(page_text)
-        page_is_label = is_label_page_text(page_text)
-
-        qf = quadrants_fitz(p_fitz.rect)
-        qp = quadrants_pypdf(reader.pages[i].mediabox)
-
-        # Primeiro, se for picklist, extraímos todos os PEDIDOS válidos e produtos
-        if page_is_pick:
-            for q_idx, (rect_fitz, box_pdf) in enumerate(zip(qf, qp)):
-                quad_text = p_fitz.get_text("text", clip=rect_fitz) or ""
-                order = extract_order_from_picklist_quad(quad_text)
-                if not order:
-                    continue
-                products = extract_products_from_picklist(quad_text)
-                if products:
-                    # agrega por pedido (pode vir de mais de um quadrante/página)
-                    acc = pick_by_order.setdefault(order, [])
-                    # evita duplicatas simples
-                    for p in products:
-                        if p not in acc:
-                            acc.append(p)
-
-        # Em seguida, se for página de etiqueta, tentamos achar o order que exista nas picklists
-        if page_is_label:
-            allowed = set(pick_by_order.keys())
-            if not allowed:
+    # ---------- 1) COLETAR LISTAS (PEDIDO -> produtos) ----------
+    pick_by_order: dict[str, list[str]] = {}
+    for i in range(len(doc_full)):
+        page = doc_full[i]
+        if not is_picklist_page_text(page.get_text("text")):
+            continue
+        qf = quadrants_fitz(page.rect)
+        for rect in qf:
+            qt = page.get_text("text", clip=rect) or ""
+            order = extract_order_from_picklist_quad(qt)
+            if not order:
                 continue
-            for q_idx, (rect_fitz, box_pdf) in enumerate(zip(qf, qp)):
-                # descarta quadrante vazio
-                if REMOVE_BLANK and quad_is_blank_by_raster(doc, i, rect_fitz):
-                    continue
-                quad_text = p_fitz.get_text("text", clip=rect_fitz) or ""
-                order = extract_order_from_label_quad(quad_text, allowed)
-                if not order:
-                    continue
-                # guarda só a primeira etiqueta encontrada para cada pedido (dedup)
-                if order not in labels_by_order:
-                    labels_by_order[order] = {
-                        "page_idx": i,
-                        "q_idx": q_idx,
-                        "fitz_rect": rect_fitz,
-                        "pypdf_box": box_pdf
-                    }
+            prods = extract_products_from_picklist(qt)
+            if not prods:
+                continue
+            acc = pick_by_order.setdefault(order, [])
+            for p in prods:
+                if p not in acc:
+                    acc.append(p)
 
-    # Montagem: 1 etiqueta por pedido (na ordem em que apareceram)
+    allowed_orders = set(pick_by_order.keys())
+    if not allowed_orders:
+        # sem listas não tem como casar; retorna só o 4→1 básico
+        writer = PdfWriter()
+        for i in range(len(reader_full.pages)):
+            page = reader_full.pages[i]
+            for (x0, y0, x1, y1) in quadrants_pypdf(page.mediabox):
+                p = deepcopy(page)
+                rect = RectangleObject([x0, y0, x1, y1])
+                p.cropbox = rect
+                p.mediabox = rect
+                # opcional: drop blank
+                if REMOVE_BLANK:
+                    # checa com fitz
+                    if quad_is_blank_by_raster(doc_full, i,
+                                               fitz.Rect(x0, y0, x1, y1)):
+                        continue
+                writer.add_page(p)
+        out = io.BytesIO(); writer.write(out); out.seek(0)
+        return out.getvalue()
+
+    # ---------- 2) SELECIONAR 1 ETIQUETA POR PEDIDO (DEDUP) ----------
+    labels_by_order: dict[str, dict] = {}   # order -> info p/ crop
+    order_sequence: list[str] = []          # ordem de saída
+    for i in range(len(doc_full)):
+        page = doc_full[i]
+        if not is_label_page_text(page.get_text("text")):
+            continue
+        qf = quadrants_fitz(page.rect)
+        qp = quadrants_pypdf(reader_full.pages[i].mediabox)
+        for rect_fitz, box_pdf in zip(qf, qp):
+            # remove quadrante vazio
+            if REMOVE_BLANK and quad_is_blank_by_raster(doc_full, i, rect_fitz):
+                continue
+            qt = page.get_text("text", clip=rect_fitz) or ""
+            order = extract_order_from_label_quad(qt, allowed_orders)
+            if not order or order in labels_by_order:
+                continue
+            labels_by_order[order] = {"page_idx": i, "pypdf_box": box_pdf}
+            order_sequence.append(order)
+
+    # ---------- 3) CORTAR AS ETIQUETAS (pypdf) ----------
     writer = PdfWriter()
-    for order, lab in labels_by_order.items():
-        p_src = reader.pages[lab["page_idx"]]
-        x0, y0, x1, y1 = lab["pypdf_box"]
+    for order in order_sequence:
+        info = labels_by_order[order]
+        p_src = reader_full.pages[info["page_idx"]]
+        x0, y0, x1, y1 = info["pypdf_box"]
         p = deepcopy(p_src)
         rect = RectangleObject([x0, y0, x1, y1])
         p.cropbox = rect
         p.mediabox = rect
-
-        products = pick_by_order.get(order, [])[:MAX_LINES]
-        if products:
-            w_pt = float(p.mediabox.right) - float(p.mediabox.left)
-            h_pt = float(p.mediabox.top) - float(p.mediabox.bottom)
-            overlay_bytes = make_overlay_pdf(w_pt, h_pt, products)
-            ov_page = PdfReader(io.BytesIO(overlay_bytes)).pages[0]
-            p.merge_page(ov_page)
-
         writer.add_page(p)
 
-    out = io.BytesIO()
-    writer.write(out)
-    out.seek(0)
-    return out.getvalue()
+    tmp = io.BytesIO()
+    writer.write(tmp)
+    tmp.seek(0)
+    cropped_bytes = tmp.getvalue()
+
+    # ---------- 4) ESCREVER O RODAPÉ (PyMuPDF, sem merge) ----------
+    out_doc = fitz.open(stream=cropped_bytes, filetype="pdf")
+    for page_idx, order in enumerate(order_sequence):
+        products = pick_by_order.get(order, [])[:MAX_LINES]
+        if not products:
+            continue
+        pg = out_doc[page_idx]
+        r = pg.rect
+        area_h = r.height * OVERLAY_HEIGHT_PCT
+        pad = 4
+        # caixa no rodapé
+        box = fitz.Rect(OVERLAY_MARGIN_X, r.height - area_h - pad,
+                        r.width - OVERLAY_MARGIN_X, r.height - pad)
+        # monta texto
+        lines = ["Produtos:"] + [f"• {t}" for t in products]
+        text = "\n".join(lines)
+        # escreve texto (PyMuPDF usa fontes padrão, não corrompe)
+        pg.insert_textbox(box, text, fontname="helv", fontsize=FONT_SIZE, align=0)  # left
+
+    # salva como bytes
+    out_buf = io.BytesIO()
+    out_doc.save(out_buf)
+    out_doc.close()
+    out_buf.seek(0)
+    return out_buf.getvalue()
 
 # ================== RUN ==================
 if uploaded_file is not None:
     try:
         pdf_bytes_in = uploaded_file.getvalue()
-        with st.spinner("Processando e vinculando pelo PEDIDO (1 etiqueta por pedido)..."):
+        with st.spinner("Processando: casando PEDIDO e escrevendo rodapé..."):
             pdf_bytes_out = process_pdf_with_picklist(pdf_bytes_in)
-
-        st.success("Pronto! 1 etiqueta por pedido, com a lista (produtos) no rodapé.")
+        st.success("Pronto! 1 etiqueta por pedido, com os produtos no rodapé.")
         st.download_button(
             label="Baixar PDF final",
             data=pdf_bytes_out,

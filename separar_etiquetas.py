@@ -1,4 +1,7 @@
 # separar_etiquetas.py
+# Requisitos: streamlit, pypdf, pymupdf, pillow
+# pip install streamlit pypdf PyMuPDF pillow
+
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import RectangleObject
@@ -8,13 +11,14 @@ import base64, io, re, unicodedata
 import fitz  # PyMuPDF
 from PIL import Image
 
-# ========= UI =========
+# ============================= UI =============================
 st.set_page_config(page_title="Etiquetas 4→1 + Lista (QNT×SKU)", layout="wide")
 st.markdown("""
 <style>
 #MainMenu, footer {visibility:hidden;}
 header, [data-testid="stToolbar"], [data-testid="stDecoration"], .stDeployButton {display:none!important;}
 div[class^="viewerBadge"], div[class*="viewerBadge"]{display:none!important;}
+a[href*="streamlit.io"][style*="position: fixed"], a[href*="streamlit.app"][style*="position: fixed"] {display:none!important;}
 </style>""", unsafe_allow_html=True)
 
 BASE_DIR = Path(__file__).parent
@@ -28,7 +32,11 @@ def show_logo_center(width_px: int = 420):
         logo_path = LOGO_DARK if theme_base == "light" else LOGO_LIGHT
     if logo_path.exists():
         b64 = base64.b64encode(logo_path.read_bytes()).decode()
-        st.markdown(f"<div style='text-align:center'><img src='data:image/png;base64,{b64}' style='width:{width_px}px;margin:0 auto;display:block'/></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='text-align:center'><img src='data:image/png;base64,{b64}' "
+            f"style='width:{width_px}px;margin:0 auto;display:block'/></div>",
+            unsafe_allow_html=True
+        )
 
 show_logo_center()
 st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Etiquetas (4→1) + Lista (QNT × SKU)</h1>", unsafe_allow_html=True)
@@ -47,13 +55,13 @@ div[data-testid="stFileUploader"] section[data-testid="stFileUploaderDropzone"]:
 
 uploaded = st.file_uploader("Selecione o PDF da Shopee (etiquetas + listas)", type=["pdf"])
 
-# ========= Constantes =========
+# ========================= Constantes =========================
 REMOVE_BLANK = True
 DPI_CHECK    = 120
 WHITE_THR    = 245
 COVERAGE     = 0.995
 
-OVERLAY_HEIGHT_PCT = 0.14
+OVERLAY_HEIGHT_PCT = 0.14  # % da altura da etiqueta para faixa de rodapé
 FONT_SIZE = 7
 MAX_LINES = 10
 MARGIN_X_PT = 18
@@ -61,7 +69,7 @@ PAD_Y_PT = 6
 
 LATIN = r"A-Za-zÀ-ÖØ-öø-ÿ"
 
-# ========= Normalização =========
+# ====================== Normalização texto ====================
 def normalize_txt(t: str) -> str:
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
@@ -82,10 +90,11 @@ def collapse_pairs(s: str) -> str:
 def norm_heavy(t: str) -> str:
     t = normalize_txt(t)
     t = collapse_pairs(t)
+    # junta padrões "S K U", "Q N T"…
     t = re.sub(r"(?:(?<=\b)[A-Za-z]\s(?=[A-Za-z]))+", lambda m: m.group(0).replace(" ",""), t)
     return t
 
-# ========= Quadrantes / Branco =========
+# ================== Quadrantes & Página em branco =============
 def quadrants_fitz(rect: fitz.Rect):
     W,H = rect.width, rect.height
     return [
@@ -116,7 +125,7 @@ def quad_is_blank_by_raster(doc: fitz.Document, page_idx: int, clip: fitz.Rect,
     total = sum(hist); white_px = sum(hist[white:256])
     return (white_px/max(total,1)) >= cov
 
-# ========= Pedido =========
+# ====================== Pedido (ID) etiqueta ==================
 ORDER_WORD_NEAR = re.compile(r"(?:ID\s*PEDIDO|PEDIDO)[:\s#-]*([A-Z0-9]{8,24})", re.I)
 ORDER_TOKEN_RE  = re.compile(r"\b([A-Z0-9]{10,24})\b")
 
@@ -133,14 +142,17 @@ def extract_order(text: str) -> str:
             return tok
     return ""
 
-# ========= Lista por COLUNAS (words) =========
+# =================== Parser da LISTA por colunas ==============
+# SKU precisa ter letras + números (evita códigos da etiqueta tipo LGO-92, SP2)
 SKU_TOKEN_RE = re.compile(r"\b(?=[A-Z0-9\-\/\.]{3,32}\b)(?=.*[A-Z])(?=.*\d)[A-Z0-9\-\/\.]+\b", re.I)
 
 def get_words(page: fitz.Page, rect: fitz.Rect):
-    # (x0, y0, x1, y1, "word", block, line, word_no)
+    """
+    PyMuPDF words: (x0, y0, x1, y1, 'word', block, line, word_no)
+    """
     ws = page.get_text("words", clip=rect)
     words = []
-    for x0,y0,x1,y1,w,*rest in ws:
+    for x0,y0,x1,y1,w,*_ in ws:
         if not str(w).strip():
             continue
         words.append({
@@ -152,17 +164,29 @@ def get_words(page: fitz.Page, rect: fitz.Rect):
     words.sort(key=lambda k:(round(k["yc"],1), k["x0"]))
     return words
 
-def group_by_lines(words, y_tol=2.5):
+def group_by_lines(words, y_tol=3.5):
+    """
+    Agrupa 'words' (dicts) em linhas. (CORRIGIDO para não acessar 'lines[-1][\"yc\"]'). 
+    Retorna: [ [word, word, ...], [word, ...], ... ]
+    """
     lines = []
     for w in words:
-        if not lines or abs(w["yc"] - lines[-1]["yc"]) > y_tol:
+        if not lines:
             lines.append([w])
+            continue
+
+        # média do yc da última linha para comparar alinhamento vertical
+        last_line = lines[-1]
+        last_y = sum(x["yc"] for x in last_line) / len(last_line)
+
+        if abs(w["yc"] - last_y) <= y_tol:
+            last_line.append(w)
         else:
-            lines[-1].append(w)
+            lines.append([w])
     return lines
 
 def merge_letters(line, gap_factor=0.6):
-    # junta letras coladas (P r o d u t o  →  PRODUTO)
+    """Junta letras próximas (ex.: 'P r o d u t o' → 'PRODUTO')."""
     if not line: return []
     avg_h = sum(w["h"] for w in line)/len(line)
     gap = avg_h * gap_factor
@@ -182,11 +206,10 @@ def merge_letters(line, gap_factor=0.6):
     return out
 
 def find_header_cols(lines):
-    # retorna dict {'PRODUTO':xc, 'VARIACAO':xc, 'QNT':xc, 'SKU':xc, 'y':baseline}
+    """Localiza cabeçalho PRODUTO | VARIAÇÃO | QNT | SKU e devolve os x-centers das colunas."""
     for ln in lines:
         groups = merge_letters(ln)
         txts = [g["t"] for g in groups]
-        # aceita QNT/QTD/QTDE
         got_qnt = any(t in ("QNT","QTD","QTDE") for t in txts)
         got_sku = "SKU" in txts
         got_prod = any("PRODUTO" in t for t in txts)
@@ -199,7 +222,6 @@ def find_header_cols(lines):
                 if g["t"] in ("QNT","QTD","QTDE"): cols["QNT"] = g["xc"]
                 if g["t"] == "SKU": cols["SKU"] = g["xc"]
             cols["y"] = groups[0]["yc"]
-            # precisa ter QNT e SKU
             if "QNT" in cols and "SKU" in cols:
                 return cols
     return {}
@@ -215,24 +237,26 @@ def nearest_group(groups, x, max_dx=60):
 
 def extract_list_by_columns(page: fitz.Page, rect: fitz.Rect) -> list[str]:
     """
-    Parser baseado em colunas (words). Retorna '- 2x ABC-123'.
+    Parser baseado em colunas (words). Retorna linhas ASCII: '- 2x ABC-123'.
     """
     words = get_words(page, rect)
     if not words: return []
     lines = group_by_lines(words)
     cols = find_header_cols(lines)
-    if not cols:  # não achou cabeçalho
+    if not cols:
         return []
 
     items = []
     header_y = cols["y"]
     for ln in lines:
-        if not ln or ln[0]["yc"] <= header_y + 2:  # linhas do cabeçalho
+        # ignora cabeçalho
+        if not ln or ln[0]["yc"] <= header_y + 2:
             continue
+
         groups = merge_letters(ln)
         line_txt = " ".join(g["t"] for g in groups)
 
-        # parada em "CHECKLIST" ou "CORTE AQUI"
+        # para em "CHECKLIST" ou "CORTE AQUI"
         if "CHECKLIST" in line_txt or "CORTE" in line_txt:
             break
 
@@ -267,14 +291,14 @@ def extract_list_by_columns(page: fitz.Page, rect: fitz.Rect) -> list[str]:
 
     return items
 
-# ========= Pipeline =========
+# ======================== Pipeline ============================
 def process_pdf(pdf_bytes: bytes, show_diag=False):
     reader = PdfReader(io.BytesIO(pdf_bytes))
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    pick_by_order = {}
-    pick_free = []
-    labels = []
+    pick_by_order = {}     # pedido -> [linhas]
+    pick_free = []         # listas sem pedido (ordem)
+    labels = []            # [{'page_idx','pypdf_box','text'}]
     diag = {"lists": [], "labels": []}
 
     for i in range(len(doc)):
@@ -285,13 +309,8 @@ def process_pdf(pdf_bytes: bytes, show_diag=False):
         for rect_fitz, box_pdf in zip(qf, qp):
             txt = p_fitz.get_text("text", clip=rect_fitz) or ""
 
-            # 1) tentar lista por colunas
+            # LISTA por colunas?
             prods = extract_list_by_columns(p_fitz, rect_fitz)
-            if not prods:
-                # fallback: tentativa simples baseada em texto (casos raros)
-                raw = norm_heavy(txt)
-                if "SKU" in raw and ("QNT" in raw or "QTD" in raw or "QTDE" in raw):
-                    pass  # (mantém vazio; já tentamos colunas)
 
             if prods:
                 order = extract_order(txt)
@@ -305,15 +324,15 @@ def process_pdf(pdf_bytes: bytes, show_diag=False):
                     if show_diag: diag["lists"].append(("sem_pedido", prods[:3]))
                 continue
 
-            # 2) etiqueta
+            # ETIQUETA (descarta quadrante branco)
             if REMOVE_BLANK and quad_is_blank_by_raster(doc, i, rect_fitz):
                 continue
             labels.append({"page_idx": i, "pypdf_box": box_pdf, "text": txt})
             if show_diag:
                 diag["labels"].append(extract_order(txt) or "(sem pedido)")
 
+    # Fallback 4→1 se nada foi detectado como etiqueta
     if not labels:
-        # fallback 4→1
         w = PdfWriter()
         for i in range(len(reader.pages)):
             page = reader.pages[i]
@@ -326,7 +345,7 @@ def process_pdf(pdf_bytes: bytes, show_diag=False):
         out = io.BytesIO(); w.write(out); out.seek(0)
         return out.getvalue(), diag
 
-    # recorta todas as etiquetas
+    # recorta todas as etiquetas em ordem
     w = PdfWriter()
     for lab in labels:
         page = reader.pages[lab["page_idx"]]
@@ -338,7 +357,7 @@ def process_pdf(pdf_bytes: bytes, show_diag=False):
     buf = io.BytesIO(); w.write(buf); buf.seek(0)
     cropped = fitz.open(stream=buf.getvalue(), filetype="pdf")
 
-    # monta 1 página por etiqueta
+    # 1 página por etiqueta + rodapé
     final_doc = fitz.open()
     used_orders = set()
     free_idx = 0
@@ -355,7 +374,7 @@ def process_pdf(pdf_bytes: bytes, show_diag=False):
             products = pick_free[free_idx][:MAX_LINES] if free_idx < len(pick_free) else []
             if free_idx < len(pick_free): free_idx += 1
 
-        # altura extra
+        # altura extra do rodapé
         lines_count = 1 + max(1, len(products))
         min_area = PAD_Y_PT*2 + (FONT_SIZE+2)*lines_count
         extra_h = max(r.height*OVERLAY_HEIGHT_PCT, min_area)
@@ -370,7 +389,7 @@ def process_pdf(pdf_bytes: bytes, show_diag=False):
     out = io.BytesIO(); final_doc.save(out); final_doc.close(); out.seek(0)
     return out.getvalue(), diag
 
-# ========= RUN =========
+# =========================== RUN =============================
 if uploaded:
     try:
         pdf_in = uploaded.getvalue()

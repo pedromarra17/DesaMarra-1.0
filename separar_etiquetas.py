@@ -41,7 +41,7 @@ def show_logo_center(width_px: int = 420):
 show_logo_center()
 st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Etiquetas Shopee</h1>", unsafe_allow_html=True)
 
-mode = st.radio("Escolha o tipo de PDF:", ["PDF com 4 etiquetas", "PDF com lista de empacotamento"], horizontal=True)
+mode = st.radio("Escolha o tipo de PDF:", ["Apenas Etiquetas", "Etiquetas com Lista de Empacotamento"], horizontal=True)
 st.divider()
 uploaded_files = st.file_uploader("Selecione PDF(s) da Shopee", type=["pdf"], accept_multiple_files=True)
 show_diag = st.toggle("Modo diagnóstico (CSV simples)", value=False)

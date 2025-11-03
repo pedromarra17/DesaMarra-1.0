@@ -61,6 +61,9 @@ def mm_to_pt(mm): return PT_PER_IN * (mm / MM_PER_IN)
 TARGET_W_PT = mm_to_pt(100)   # 10 cm
 TARGET_H_PT = mm_to_pt(150)   # 15 cm
 
+# fonte padrão (Helvetica do PDF)
+FONT_NAME = "helv"
+
 def normalize_txt(t: str) -> str:
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
@@ -213,22 +216,27 @@ def extract_list_rows(page: fitz.Page, list_clip: fitz.Rect, col_x: dict):
             rows.append(r)
     return rows
 
+# === função de desenho CORRIGIDA (usa fontname=) ===
 def draw_list_vector(page_out: fitz.Page, x, y, width, max_height, rows,
-                     font=fitz.Font("helv"), base_size=9.5, min_size=7.0,
+                     base_size=9.5, min_size=7.0,
                      col_ratio=(0.58, 0.18, 0.14, 0.10), line_gap=1.6):
+    """
+    Desenha a lista reflowada: Produto | SKU | Variação | Quantidade.
+    Faz autofit p/ caber na altura e usa 'fontname=' (compatível com PyMuPDF antigo).
+    """
     col_w = [width*r for r in col_ratio]
+
+    def tb(rect, txt, size, align=0):
+        return page_out.insert_textbox(rect, txt, fontsize=size, fontname=FONT_NAME, align=align)
+
     size = base_size
     while size >= min_size:
         cursor = y; ok = True
         for r in rows:
-            h_prod = page_out.insert_textbox(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4),
-                                             r["produto"], font=font, fontsize=size, align=0)
-            h_sku  = page_out.insert_textbox(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4),
-                                             r["sku"], font=font, fontsize=size, align=0)
-            h_var  = page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4),
-                                             r["variacao"], font=font, fontsize=size, align=0)
-            h_qtd  = page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4),
-                                             r["qtd"], font=font, fontsize=size, align=2)
+            h_prod = tb(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4), r["produto"], size, align=0)
+            h_sku  = tb(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4), r["sku"], size, align=0)
+            h_var  = tb(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4), r["variacao"], size, align=0)
+            h_qtd  = tb(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4), r["qtd"], size, align=2)
             h = max(h_prod, h_sku, h_var, h_qtd)
             cursor += h * line_gap
             if cursor - y > max_height + 0.1:
@@ -236,27 +244,21 @@ def draw_list_vector(page_out: fitz.Page, x, y, width, max_height, rows,
         if ok:
             cursor = y
             for r in rows:
-                h_prod = page_out.insert_textbox(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4),
-                                                 r["produto"], font=font, fontsize=size, align=0)
-                page_out.insert_textbox(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4),
-                                        r["sku"], font=font, fontsize=size, align=0)
-                page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4),
-                                        r["variacao"], font=font, fontsize=size, align=0)
-                page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4),
-                                        r["qtd"], font=font, fontsize=size, align=2)
+                h_prod = tb(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4), r["produto"], size, align=0)
+                tb(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4), r["sku"], size, align=0)
+                tb(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4), r["variacao"], size, align=0)
+                tb(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4), r["qtd"], size, align=2)
                 cursor += h_prod * line_gap
             return cursor - y
         size -= 0.5
+
+    # fallback mínimo
     cursor = y
     for r in rows:
-        h_prod = page_out.insert_textbox(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4),
-                                         r["produto"], font=font, fontsize=min_size, align=0)
-        page_out.insert_textbox(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4),
-                                r["sku"], font=fitz.Font("helv"), fontsize=min_size, align=0)
-        page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4),
-                                r["variacao"], font=fitz.Font("helv"), fontsize=min_size, align=0)
-        page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4),
-                                r["qtd"], font=fitz.Font("helv"), fontsize=min_size, align=2)
+        h_prod = tb(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4), r["produto"], min_size, align=0)
+        tb(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4), r["sku"], min_size, align=0)
+        tb(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4), r["variacao"], min_size, align=0)
+        tb(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4), r["qtd"], min_size, align=2)
         cursor += h_prod * line_gap
     return cursor - y
 
@@ -342,7 +344,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
             label_raw = fitz.Rect(col.x0, col.y0, col.x1, max(col.y0+20, checklist_top-4))
             list_raw  = fitz.Rect(col.x0, table_head_y-1, col.x1, col.y1-6)
 
-            # etiqueta: bbox blocks + trim por raster
+            # etiqueta: bbox + trim
             label_clip_blk = content_bbox(pg, label_raw)
             label_clip     = trim_bbox_by_raster(src, pi, label_clip_blk, dpi=220, white=245, cov=0.997, pad_pt=1.0)
 

@@ -158,15 +158,12 @@ def content_bbox(page: fitz.Page, clip: fitz.Rect, pad: float = 2.0) -> fitz.Rec
 # ========================= LISTA DE EMPACOTAMENTO =========================
 def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
     """
-    Empacotamento (2 colunas por página) -> saída 10x15 cm:
-      • Página 1: ETIQUETA (altura limitada) + início da TABELA (sem coluna '#').
-      • Páginas seguintes: continuação da TABELA, mantendo legibilidade (sem encolher demais).
+    Empacotamento (2 colunas por página): gera 1 página por etiqueta contendo:
+      [ETIQUETA] + [TABELA a partir de SKU/QUANTIDADE]
+    Remove espaços brancos, remove a coluna '#', e ajusta a saída para 10x15 cm.
     """
-    # ===== Parâmetros de layout =====
-    LABEL_MAX_RATIO = 0.45   # etiqueta ocupa no máx. 45% da altura 10x15
-    H_PAD = 0.0              # sem margem horizontal (use 0–6 pt se quiser respiro)
-
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
+    assembled = fitz.open()
     diag_rows = []
 
     def norm_blocks(page, clip):
@@ -177,8 +174,6 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
             out.append((x0,y0,x1,y1,str(txt)))
         return out
 
-    out_doc = fitz.open()
-
     for pi in range(len(src)):
         pg = src[pi]; R = pg.rect
         left  = fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, R.y1)
@@ -187,7 +182,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
         for ci, col in enumerate([left, right], start=1):
             blocks = norm_blocks(pg, col)
 
-            # 1) topo do "Checklist..."
+            # 1) Detecta topo do "Checklist..."
             checklist_top = None
             for x0,y0,x1,y1,txt in blocks:
                 if "CHECKLIST" in norm_heavy(txt).upper():
@@ -199,7 +194,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
             if checklist_top is None:
                 checklist_top = col.y0 + col.height*0.62
 
-            # 2) cabeçalho da TABELA (SKU + QUANTIDADE)
+            # 2) Cabeçalho da tabela (SKU + QUANTIDADE)
             table_head_y = None
             for x0,y0,x1,y1,txt in blocks:
                 if y0 >= checklist_top - 2:
@@ -209,7 +204,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
             if table_head_y is None:
                 table_head_y = checklist_top + 28
 
-            # 3) detectar borda esquerda da tabela pela coluna "PRODUTO" (remover coluna '#')
+            # 3) NOVO: detectar borda esquerda da tabela pela coluna "PRODUTO"
             header_band = fitz.Rect(col.x0, table_head_y - 10, col.x1, table_head_y + 24)
             header_words = pg.get_text("words", clip=header_band)
 
@@ -221,98 +216,72 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
                     left_x = x0           # início da coluna PRODUTO
                 if txt in {"#", "Nº", "NO"}:
                     hash_right = x1       # fim da coluna '#'
+
             if left_x is None and hash_right is not None:
-                left_x = hash_right + 6
+                left_x = hash_right + 6   # pequeno pad para não cortar borda
             if left_x is None:
-                left_x = col.x0 + 26
+                left_x = col.x0 + 26      # fallback se nada encontrado
 
-            # 4) áreas brutas
+            # 4) Áreas brutas
             label_raw = fitz.Rect(col.x0, col.y0, col.x1, max(col.y0+20, checklist_top-4))
-            list_raw  = fitz.Rect(left_x, table_head_y-1, col.x1, col.y1-6)
+            list_raw  = fitz.Rect(left_x, table_head_y-1, col.x1, col.y1-6)  # começa em PRODUTO
 
-            # 5) corta branco
+            # 5) Corta branco
             label_clip = content_bbox(pg, label_raw)
             list_clip  = content_bbox(pg, list_raw)
 
-            # 6) se etiqueta vazia, ignora coluna inteira
+            # 6) Pula colunas sem etiqueta
             if REMOVE_BLANK and quad_is_blank_by_raster(src, pi, label_clip):
                 continue
 
-            # ===== Escalas base (por largura) =====
-            content_w = TARGET_W_PT - 2*H_PAD
+            # 7) Mede e monta página empilhada (etiqueta + lista)
             lw, lh = label_clip.width, label_clip.height
-            tw, th = list_clip.width,  list_clip.height
+            if quad_is_blank_by_raster(src, pi, list_clip):
+                use_list = False; tw, th = lw, 0
+            else:
+                use_list = True;  tw, th = list_clip.width, list_clip.height
 
-            # escala de largura para ambos
-            label_scale_w = content_w / lw
-            list_scale_w  = content_w / tw
+            final_w = max(lw, tw)
+            final_h = lh + th
+            page_out = assembled.new_page(width=final_w, height=final_h)
 
-            # altura reservada para a etiqueta (cap por ratio)
-            label_h_cap = TARGET_H_PT * LABEL_MAX_RATIO
-            label_h_render = min(label_h_cap, lh * label_scale_w)
-
-            # altura disponível para a lista na 1ª página
-            first_list_space = TARGET_H_PT - label_h_render
-            if first_list_space < 24:  # se sobrar quase nada, joga tudo da lista para páginas seguintes
-                first_list_space = 0
-
-            # função para "consumir" a lista em janelas (segmentos) que caibam na altura restante
-            def yield_list_segments(start_y, avail_height_pt):
-                """Gera sub-rects da lista (em coords originais) que cabem em 'avail_height_pt' já mapeados por list_scale_w."""
-                if avail_height_pt <= 0:
-                    return
-                max_src_h = avail_height_pt / list_scale_w  # altura em coords originais que cabe
-                cur_y = start_y
-                end_y = list_clip.y1
-                if max_src_h <= 0:
-                    return
-                seg_y1 = min(cur_y + max_src_h, end_y)
-                if seg_y1 - cur_y >= 1:  # evita segmentos minúsculos
-                    yield fitz.Rect(list_clip.x0, cur_y, list_clip.x1, seg_y1)
-
-            # ===== Página 1: etiqueta + início da lista =====
-            pg_new = out_doc.new_page(width=TARGET_W_PT, height=TARGET_H_PT)
-
-            # desenha etiqueta (topo)
-            pg_new.show_pdf_page(
-                fitz.Rect(H_PAD, 0, H_PAD + lw*label_scale_w, label_h_render),
+            # etiqueta topo
+            page_out.show_pdf_page(
+                fitz.Rect(0, 0, lw, lh),
                 src, pi, clip=label_clip
             )
-
-            # desenha o primeiro pedaço da lista (se couber algo)
-            next_y = list_clip.y0
-            if first_list_space > 0 and th > 0 and not quad_is_blank_by_raster(src, pi, list_clip):
-                for seg in yield_list_segments(next_y, first_list_space):
-                    seg_h_pt = (seg.height) * list_scale_w
-                    pg_new.show_pdf_page(
-                        fitz.Rect(H_PAD, label_h_render, H_PAD + tw*list_scale_w, label_h_render + seg_h_pt),
-                        src, pi, clip=seg
-                    )
-                    next_y = seg.y1
-                    break  # só 1 segmento na primeira página
-
-            # ===== Páginas seguintes: só lista (continuação) =====
-            while next_y < list_clip.y1 - 0.5:
-                pg_cont = out_doc.new_page(width=TARGET_W_PT, height=TARGET_H_PT)
-                avail = TARGET_H_PT  # página inteira para lista
-                # cabem vários segmentos por página? na prática, usamos 1 retângulo contínuo por página
-                max_src_h = avail / list_scale_w
-                seg = fitz.Rect(list_clip.x0, next_y, list_clip.x1, min(next_y + max_src_h, list_clip.y1))
-                seg_h_pt = (seg.height) * list_scale_w
-                pg_cont.show_pdf_page(
-                    fitz.Rect(H_PAD, 0, H_PAD + tw*list_scale_w, seg_h_pt),
-                    src, pi, clip=seg
+            # lista embaixo (sem coluna '#')
+            if use_list:
+                page_out.show_pdf_page(
+                    fitz.Rect(0, lh, tw, lh+th),
+                    src, pi, clip=list_clip
                 )
-                next_y = seg.y1
 
             if diagnostic:
                 diag_rows.append({
-                    "page_src": pi+1, "col": ci,
-                    "label_h_cap": round(label_h_cap,1),
-                    "label_h_render": round(label_h_render,1),
-                    "first_list_space": round(first_list_space,1),
-                    "list_total_h": round(th*list_scale_w,1)
+                    "page": pi+1, "col": ci,
+                    "checklist_top": round(checklist_top,1),
+                    "table_head_y": round(table_head_y,1),
+                    "left_x": round(left_x,1),
+                    "label_clip": f"{round(label_clip.x0,1)},{round(label_clip.y0,1)}-{round(label_clip.x1,1)},{round(label_clip.y1,1)}",
+                    "list_clip":  f"{round(list_clip.x0,1)},{round(list_clip.y0,1)}-{round(list_clip.x1,1)},{round(list_clip.y1,1)}",
                 })
+
+    # 8) Encaixa cada página final em 10x15 cm (centralizado, mantendo proporção)
+    out_doc = fitz.open()
+    for i in range(len(assembled)):
+        src_pg = assembled[i]
+        sw, sh = src_pg.rect.width, src_pg.rect.height
+        scale = min(TARGET_W_PT / sw, TARGET_H_PT / sh)
+        tw, th = sw * scale, sh * scale
+        dx = (TARGET_W_PT - tw) / 2
+        dy = (TARGET_H_PT - th) / 2
+
+        pg_new = out_doc.new_page(width=TARGET_W_PT, height=TARGET_H_PT)
+        pg_new.show_pdf_page(
+            fitz.Rect(dx, dy, dx+tw, dy+th),
+            assembled, i
+        )
 
     buf = io.BytesIO()
     out_doc.save(buf)

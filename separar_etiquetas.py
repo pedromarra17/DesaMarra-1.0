@@ -11,7 +11,7 @@ import fitz  # PyMuPDF
 from PIL import Image
 import pandas as pd
 
-# ============================= UI / THEME =============================
+# =============== Configuração da página/tema/branding ===============
 st.set_page_config(page_title="Etiquetas Shopee – 4→1 / Empacotamento", layout="wide")
 st.markdown("""
 <style>
@@ -41,13 +41,13 @@ def show_logo_center(width_px: int = 420):
 show_logo_center()
 st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Etiquetas Shopee</h1>", unsafe_allow_html=True)
 
-mode = st.radio("Escolha o tipo de PDF:", ["Apenas Etiquetas", "Etiquetas com lista de Empacotamento"], horizontal=True)
+mode = st.radio("Escolha o tipo de PDF:", ["PDF com 4 etiquetas", "PDF com lista de empacotamento"], horizontal=True)
 st.divider()
 uploaded_files = st.file_uploader("Selecione PDF(s) da Shopee", type=["pdf"], accept_multiple_files=True)
 show_diag = st.toggle("Modo diagnóstico (CSV simples)", value=False)
 process_btn = st.button("Processar")
 
-# ========================= Constantes / Utils =========================
+# ================= Constantes / utilidades =================
 REMOVE_BLANK = True
 DPI_CHECK    = 120
 WHITE_THR    = 245
@@ -55,7 +55,6 @@ COVERAGE     = 0.995
 
 LATIN = r"A-Za-zÀ-ÖØ-öø-ÿ"
 
-# --- tamanho de saída 10x15 cm ---
 PT_PER_IN = 72.0
 MM_PER_IN = 25.4
 def mm_to_pt(mm): return PT_PER_IN * (mm / MM_PER_IN)
@@ -94,7 +93,6 @@ def quad_is_blank_by_raster(doc: fitz.Document, page_idx: int, clip: fitz.Rect,
     return (white_px/max(total,1)) >= cov
 
 def content_bbox(page: fitz.Page, clip: fitz.Rect, pad: float = 2.0) -> fitz.Rect:
-    """Menor retângulo com conteúdo (por blocks)."""
     blocks = page.get_text("blocks", clip=clip)
     xs0, ys0, xs1, ys1 = [], [], [], []
     for b in blocks:
@@ -112,9 +110,6 @@ def content_bbox(page: fitz.Page, clip: fitz.Rect, pad: float = 2.0) -> fitz.Rec
 def trim_bbox_by_raster(doc: fitz.Document, page_idx: int, rect: fitz.Rect,
                         dpi: int = 200, white: int = 245, cov: float = 0.995,
                         pad_pt: float = 1.5) -> fitz.Rect:
-    """
-    Encolhe 'rect' eliminando bordas totalmente brancas (por raster). Saída continua vetorial.
-    """
     page = doc[page_idx]
     if rect.width <= 0 or rect.height <= 0:
         return rect
@@ -153,11 +148,6 @@ def trim_bbox_by_raster(doc: fitz.Document, page_idx: int, rect: fitz.Rect,
 
 def tighten_right_edge(page: fitz.Page, doc: fitz.Document, page_idx: int,
                        rect: fitz.Rect, pad_pt: float = 2.0) -> fitz.Rect:
-    """
-    Aperta a borda direita do 'rect' para o último conteúdo real:
-    1) usa words (x1 máximo);
-    2) fallback por raster (apenas medição).
-    """
     words = page.get_text("words", clip=rect)
     if words:
         max_x1 = max(w[2] for w in words)
@@ -166,7 +156,111 @@ def tighten_right_edge(page: fitz.Page, doc: fitz.Document, page_idx: int,
     tight = trim_bbox_by_raster(doc, page_idx, rect, dpi=200, white=245, cov=0.997, pad_pt=1.0)
     return fitz.Rect(rect.x0, rect.y0, min(rect.x1, tight.x1), rect.y1)
 
-# ============================== 4 ETIQUETAS ==============================
+# ---------- helpers para reconstruir a tabela com word-wrap ----------
+def find_column_edges_from_header(page: fitz.Page, header_band: fitz.Rect):
+    words = page.get_text("words", clip=header_band)
+    key = {}
+    for x0,y0,x1,y1,w,*_ in words:
+        t = norm_heavy(str(w)).upper()
+        if "PRODUTO"   in t and "produto"   not in key: key["produto"]   = x0
+        if t == "SKU" or t.endswith("SKU"):             key["sku"]       = x0
+        if "VARIACAO" in t:                             key["variacao"]  = x0
+        if "QUANTIDADE" in t or t.startswith("QTD"):    key["qtd"]       = x0
+    return key
+
+def extract_list_rows(page: fitz.Page, list_clip: fitz.Rect, col_x: dict):
+    words = page.get_text("words", clip=list_clip)
+    if not words:
+        return []
+    x_prod = col_x.get("produto", list_clip.x0)
+    x_sku  = col_x.get("sku", x_prod + 120)
+    x_var  = col_x.get("variacao", x_sku + 120)
+    x_qtd  = col_x.get("qtd", x_var + 120)
+
+    lines = {}
+    for x0,y0,x1,y1,w,*_ in words:
+        yc = (y0 + y1) / 2
+        bucket = None
+        for k in lines:
+            if abs(k - yc) < 5:
+                bucket = k; break
+        if bucket is None:
+            lines[yc] = []
+            bucket = yc
+        lines[bucket].append((x0,y0,x1,y1,str(w)))
+
+    rows=[]
+    for yc in sorted(lines.keys()):
+        row = {"produto":[], "sku":[], "variacao":[], "qtd":[]}
+        for x0,y0,x1,y1,w in sorted(lines[yc], key=lambda t:t[0]):
+            xm = (x0+x1)/2
+            if xm < x_sku:            row["produto"].append(w)
+            elif xm < x_var:          row["sku"].append(w)
+            elif xm < x_qtd:          row["variacao"].append(w)
+            else:                     row["qtd"].append(w)
+        def join(v): return norm_heavy(" ".join(v)).strip()
+        r = {
+            "produto":  join(row["produto"]),
+            "sku":      join(row["sku"]),
+            "variacao": join(row["variacao"]),
+            "qtd":      join(row["qtd"]) or "1",
+        }
+        hdr = (r["produto"].upper().startswith("PRODUTO") or
+               r["sku"].upper()=="SKU" or
+               r["variacao"].upper().startswith("VARIAC") or
+               r["qtd"].upper().startswith("QUANT"))
+        if not hdr:
+            rows.append(r)
+    return rows
+
+def draw_list_vector(page_out: fitz.Page, x, y, width, max_height, rows,
+                     font=fitz.Font("helv"), base_size=9.5, min_size=7.0,
+                     col_ratio=(0.58, 0.18, 0.14, 0.10), line_gap=1.6):
+    col_w = [width*r for r in col_ratio]
+    size = base_size
+    while size >= min_size:
+        cursor = y; ok = True
+        for r in rows:
+            h_prod = page_out.insert_textbox(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4),
+                                             r["produto"], font=font, fontsize=size, align=0)
+            h_sku  = page_out.insert_textbox(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4),
+                                             r["sku"], font=font, fontsize=size, align=0)
+            h_var  = page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4),
+                                             r["variacao"], font=font, fontsize=size, align=0)
+            h_qtd  = page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4),
+                                             r["qtd"], font=font, fontsize=size, align=2)
+            h = max(h_prod, h_sku, h_var, h_qtd)
+            cursor += h * line_gap
+            if cursor - y > max_height + 0.1:
+                ok = False; break
+        if ok:
+            cursor = y
+            for r in rows:
+                h_prod = page_out.insert_textbox(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4),
+                                                 r["produto"], font=font, fontsize=size, align=0)
+                page_out.insert_textbox(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4),
+                                        r["sku"], font=font, fontsize=size, align=0)
+                page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4),
+                                        r["variacao"], font=font, fontsize=size, align=0)
+                page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4),
+                                        r["qtd"], font=font, fontsize=size, align=2)
+                cursor += h_prod * line_gap
+            return cursor - y
+        size -= 0.5
+    cursor = y
+    for r in rows:
+        h_prod = page_out.insert_textbox(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4),
+                                         r["produto"], font=font, fontsize=min_size, align=0)
+        page_out.insert_textbox(fitz.Rect(x+col_w[0], cursor, x+col_w[0]+col_w[1], cursor+1e4),
+                                r["sku"], font=fitz.Font("helv"), fontsize=min_size, align=0)
+        page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1], cursor, x+col_w[0]+col_w[1]+col_w[2], cursor+1e4),
+                                r["variacao"], font=fitz.Font("helv"), fontsize=min_size, align=0)
+        page_out.insert_textbox(fitz.Rect(x+col_w[0]+col_w[1]+col_w[2], cursor, x+width, cursor+1e4),
+                                r["qtd"], font=fitz.Font("helv"), fontsize=min_size, align=2)
+        cursor += h_prod * line_gap
+    return cursor - y
+
+# ==================== Modo 4 etiquetas (4→1) ====================
 def process_mode_4up(pdf_bytes: bytes, diagnostic=False):
     reader = PdfReader(io.BytesIO(pdf_bytes))
     doc    = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -174,10 +268,10 @@ def process_mode_4up(pdf_bytes: bytes, diagnostic=False):
     def quads_fitz(rect: fitz.Rect):
         W,H = rect.width, rect.height
         return [
-            fitz.Rect(rect.x0,       rect.y0,       rect.x0+W/2, rect.y0+H/2),  # TL
-            fitz.Rect(rect.x0+W/2,   rect.y0,       rect.x1,     rect.y0+H/2),  # TR
-            fitz.Rect(rect.x0,       rect.y0+H/2,   rect.x0+W/2, rect.y1    ),  # BL
-            fitz.Rect(rect.x0+W/2,   rect.y0+H/2,   rect.x1,     rect.y1    ),  # BR
+            fitz.Rect(rect.x0,       rect.y0,       rect.x0+W/2, rect.y0+H/2),
+            fitz.Rect(rect.x0+W/2,   rect.y0,       rect.x1,     rect.y0+H/2),
+            fitz.Rect(rect.x0,       rect.y0+H/2,   rect.x0+W/2, rect.y1    ),
+            fitz.Rect(rect.x0+W/2,   rect.y0+H/2,   rect.x1,     rect.y1    ),
         ]
 
     def quads_pdf(mb):
@@ -209,15 +303,8 @@ def process_mode_4up(pdf_bytes: bytes, diagnostic=False):
     out.seek(0)
     return out.getvalue(), pd.DataFrame(diag)
 
-# =================== LISTA DE EMPACOTAMENTO (1 pág 10×15) ===================
+# ========== Modo Lista de Empacotamento (1 pág 10×15, reflow) ==========
 def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
-    """
-    Empacotamento (2 colunas por página) -> 1 página 10x15 cm (somente vetor):
-      • Recorta ETIQUETA (em cima) com trim de espaços brancos.
-      • Recorta LISTA (embaixo), remove coluna '#', e aperta à direita (remove espaço morto).
-      • Ajuste novo: ambos TENTAM usar a largura total; se estourar a altura, aplica-se um
-        fator de compressão único (mantendo proporção) para caber em 10x15.
-    """
     H_PAD = 0.0
     V_PAD = 0.0
 
@@ -225,128 +312,86 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
     out_doc = fitz.open()
     diag_rows = []
 
-    def norm_blocks(page, clip):
-        out=[]
-        for b in page.get_text("blocks", clip=clip):
-            x0,y0,x1,y1 = b[0],b[1],b[2],b[3]
-            txt = b[4] if len(b)>=5 else ""
-            out.append((x0,y0,x1,y1,str(txt)))
-        return out
-
     for pi in range(len(src)):
         pg = src[pi]; R = pg.rect
-        left  = fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, R.y1)
-        right = fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, R.y1)
+        cols = [fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, R.y1),
+                fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, R.y1)]
 
-        for ci, col in enumerate([left, right], start=1):
-            blocks = norm_blocks(pg, col)
+        for ci, col in enumerate(cols, start=1):
+            blocks = pg.get_text("blocks", clip=col)
 
-            # 1) Topo "Checklist..."
             checklist_top = None
-            for x0,y0,x1,y1,txt in blocks:
-                if "CHECKLIST" in norm_heavy(txt).upper():
-                    checklist_top = y0; break
+            for b in blocks:
+                if "CHECKLIST" in norm_heavy(str(b[4])).upper():
+                    checklist_top = b[1]; break
             if checklist_top is None:
-                for x0,y0,x1,y1,txt in blocks:
-                    if "ID PEDIDO" in norm_heavy(txt).upper():
-                        checklist_top = y0; break
+                for b in blocks:
+                    if "ID PEDIDO" in norm_heavy(str(b[4])).upper():
+                        checklist_top = b[1]; break
             if checklist_top is None:
                 checklist_top = col.y0 + col.height*0.62
 
-            # 2) Cabeçalho da tabela (SKU + QUANTIDADE)
             table_head_y = None
-            for x0,y0,x1,y1,txt in blocks:
-                if y0 >= checklist_top - 2:
-                    up = norm_heavy(txt).upper()
+            for b in blocks:
+                if b[1] >= checklist_top - 2:
+                    up = norm_heavy(str(b[4])).upper()
                     if ("SKU" in up) and ("QUANTIDADE" in up or up.endswith("QUANTIDADE")):
-                        table_head_y = y0; break
-            if table_head_y is None:
-                table_head_y = checklist_top + 28
+                        table_head_y = b[1]; break
+            if table_head_y is None: table_head_y = checklist_top + 28
 
-            # 3) Remover coluna "#": usar borda esquerda da coluna PRODUTO
-            header_band  = fitz.Rect(col.x0, table_head_y - 10, col.x1, table_head_y + 24)
-            header_words = pg.get_text("words", clip=header_band)
-            left_x, hash_right = None, None
-            for x0,y0,x1,y1,w,*_ in header_words:
-                t = norm_heavy(str(w)).upper().strip()
-                if "PRODUTO" in t and left_x is None: left_x = x0
-                if t in {"#", "Nº", "NO"}: hash_right = x1
-            if left_x is None and hash_right is not None: left_x = hash_right + 6
-            if left_x is None: left_x = col.x0 + 26
-
-            # 4) Áreas brutas
             label_raw = fitz.Rect(col.x0, col.y0, col.x1, max(col.y0+20, checklist_top-4))
-            list_raw  = fitz.Rect(left_x, table_head_y-1, col.x1, col.y1-6)
+            list_raw  = fitz.Rect(col.x0, table_head_y-1, col.x1, col.y1-6)
 
-            # 5) BBox por blocks
+            # etiqueta: bbox blocks + trim por raster
             label_clip_blk = content_bbox(pg, label_raw)
-            list_clip      = content_bbox(pg, list_raw)
+            label_clip     = trim_bbox_by_raster(src, pi, label_clip_blk, dpi=220, white=245, cov=0.997, pad_pt=1.0)
 
-            # 6) Trim mais apertado na ETIQUETA (remove bordas brancas incluindo códigos/QR)
-            label_clip = trim_bbox_by_raster(src, pi, label_clip_blk, dpi=220, white=245, cov=0.997, pad_pt=1.0)
-
-            # 7) Aperta a borda direita da LISTA (remove espaço morto após 'Quantidade')
+            # lista: detectar colunas, bbox e apertar direita
+            header_band = fitz.Rect(col.x0, table_head_y - 10, col.x1, table_head_y + 24)
+            cols_x = find_column_edges_from_header(pg, header_band)
+            if "produto" not in cols_x:
+                cols_x["produto"] = list_raw.x0 + 26
+            list_clip = content_bbox(pg, list_raw)
             list_clip = tighten_right_edge(pg, src, pi, list_clip, pad_pt=2.0)
 
-            # 8) Etiqueta obrigatória: se branca, pula a coluna
             if REMOVE_BLANK and quad_is_blank_by_raster(src, pi, label_clip):
                 continue
 
-            # 9) Mede e tenta usar a largura total para AMBOS
+            # dimensões/escala para etiqueta preencher largura
             lw, lh = label_clip.width, label_clip.height
-            if quad_is_blank_by_raster(src, pi, list_clip):
-                use_list = False; tw, th = lw, 0
-            else:
-                use_list = True;  tw, th = list_clip.width, list_clip.height
-
             content_w = TARGET_W_PT - 2*H_PAD
             content_h = TARGET_H_PT - 2*V_PAD
-
-            # escalas independentes para ENCHER a largura
             sL = content_w / lw
-            sT = content_w / tw if use_list else sL
-
-            # alturas se ambos preencherem a largura
             HL = lh * sL
-            HT = th * sT if use_list else 0.0
-            Hsum_full = HL + HT
 
-            # se couber, ótimo; se não, aplica fator comum 'c'
-            if Hsum_full <= content_h or Hsum_full == 0:
-                c = 1.0
-            else:
-                c = content_h / Hsum_full
+            # extrai e reflow das linhas
+            rows = extract_list_rows(pg, list_clip, cols_x)
 
-            # dimensões finais após possível compressão
-            Lw, Lh = content_w * c, HL * c
-            Tw, Th = (content_w * c, HT * c) if use_list else (0, 0)
-
-            # 10) cria página 10x15 e desenha vetor
+            # cria página
             pg_new = out_doc.new_page(width=TARGET_W_PT, height=TARGET_H_PT)
-            x = (TARGET_W_PT - Lw) / 2  # os dois terão mesma largura final
+            x = (TARGET_W_PT - content_w) / 2
             y = V_PAD
 
             # etiqueta
-            pg_new.show_pdf_page(
-                fitz.Rect(x, y, x+Lw, y+Lh),
-                src, pi, clip=label_clip
-            )
-            y += Lh
+            pg_new.show_pdf_page(fitz.Rect(x, y, x+content_w, y+HL), src, pi, clip=label_clip)
+            y += HL
 
-            # lista
-            if use_list and Th > 0.5:
-                pg_new.show_pdf_page(
-                    fitz.Rect(x, y, x+Tw, y+Th),
-                    src, pi, clip=list_clip
-                )
+            # lista reflowada
+            used_h = draw_list_vector(pg_new, x, y, content_w, content_h - HL, rows)
+
+            total_h = HL + used_h
+            if total_h > content_h + 0.1:
+                c = content_h / total_h
+                out_doc.delete_page(-1)
+                pg_new = out_doc.new_page(width=TARGET_W_PT, height=TARGET_H_PT)
+                x = (TARGET_W_PT - content_w*c) / 2
+                y = V_PAD
+                pg_new.show_pdf_page(fitz.Rect(x, y, x+content_w*c, y+HL*c), src, pi, clip=label_clip)
+                y += HL*c
+                draw_list_vector(pg_new, x, y, content_w*c, content_h - HL*c, rows)
 
             if diagnostic:
-                diag_rows.append({
-                    "src_page": pi+1, "col": ci,
-                    "sL": round(sL,3), "sT": round(sT,3), "c": round(c,3),
-                    "Lw": round(Lw,1), "Lh": round(Lh,1),
-                    "Tw": round(Tw,1), "Th": round(Th,1),
-                })
+                diag_rows.append({"page": pi+1, "col": ci, "rows": len(rows)})
 
     buf = io.BytesIO()
     out_doc.save(buf, garbage=4, deflate=True)
@@ -354,8 +399,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
     buf.seek(0)
     return buf.getvalue(), pd.DataFrame(diag_rows)
 
-
-# ================================= RUN =================================
+# =============================== RUN ===============================
 if process_btn:
     if not uploaded_files:
         st.warning("Selecione pelo menos um PDF.")

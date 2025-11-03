@@ -1,16 +1,15 @@
 # separar_etiquetas.py
-# pip install streamlit pypdf PyMuPDF pillow requests pandas
+# pip install streamlit pypdf PyMuPDF pillow pandas
 
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import RectangleObject
 from copy import deepcopy
 from pathlib import Path
-import base64, io, re, unicodedata, zipfile
+import base64, io, re, unicodedata
 import fitz  # PyMuPDF
 from PIL import Image
-import requests
-from urllib.parse import urlparse, unquote
+import pandas as pd
 
 # ============================= UI =============================
 st.set_page_config(page_title="Etiquetas 4→1 + Lista (QNT×SKU)", layout="wide")
@@ -19,7 +18,8 @@ st.markdown("""
 #MainMenu, footer {visibility:hidden;}
 header,[data-testid="stToolbar"],[data-testid="stDecoration"],.stDeployButton{display:none!important;}
 div[class^="viewerBadge"],div[class*="viewerBadge"]{display:none!important;}
-</style>""", unsafe_allow_html=True)
+</style>
+""", unsafe_allow_html=True)
 
 BASE_DIR = Path(__file__).parent
 LOGO_LIGHT = BASE_DIR / "logo_light.png"
@@ -43,23 +43,9 @@ st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Etiquetas (4→1) + 
 st.markdown("<p style='text-align:center'>1 página por etiqueta. Rodapé: <b>QNT × SKU</b>. Casa por <b>Pedido</b>; se não achar, por <b>ordem</b>.</p>", unsafe_allow_html=True)
 st.divider()
 
-src = st.radio("Como deseja enviar?", ["Upload de PDF(s)", "Link(s) de PDF/ZIP"], horizontal=True)
-uploaded_files = None
-urls_text = ""
-cookie_header = ""
-custom_headers = ""
-
-if src == "Upload de PDF(s)":
-    uploaded_files = st.file_uploader("Selecione PDF(s) – Shopee (etiquetas + listas)", type=["pdf"], accept_multiple_files=True)
-else:
-    urls_text = st.text_area("Cole 1 link por linha (PDF direto ou ZIP com PDFs dentro):", height=120,
-                             placeholder="https://.../arquivo.pdf\nhttps://.../lote.zip")
-    with st.expander("Se o link exigir login/sessão (Shopee), informe cabeçalhos opcionalmente"):
-        cookie_header = st.text_input("Cookie:", placeholder="spc_ecid=...; SPC_SI=...; ...")
-        custom_headers = st.text_area("Headers extras (opcional, JSON simples: chave:valor por linha)",
-                                      placeholder="User-Agent: Mozilla/5.0\nReferer: https://shopee.com.br/")
-
-process_btn = st.button("Baixar e Processar" if src == "Link(s) de PDF/ZIP" else "Processar")
+uploaded_files = st.file_uploader("Selecione PDF(s) da Shopee (etiquetas + listas)", type=["pdf"], accept_multiple_files=True)
+show_diag = st.toggle("Modo diagnóstico", value=False, help="Gera CSV e PDF de preview com caixas.")
+process_btn = st.button("Processar")
 
 # ========================= Constantes =========================
 REMOVE_BLANK = True
@@ -67,7 +53,7 @@ DPI_CHECK    = 120
 WHITE_THR    = 245
 COVERAGE     = 0.995
 
-OVERLAY_HEIGHT_PCT = 0.14
+OVERLAY_HEIGHT_PCT = 0.14  # % da altura da etiqueta para faixa de rodapé
 FONT_SIZE = 7
 MAX_LINES = 12
 MARGIN_X_PT = 18
@@ -75,7 +61,7 @@ PAD_Y_PT = 6
 
 LATIN = r"A-Za-zÀ-ÖØ-öø-ÿ"
 
-# ====================== Normalização ==========================
+# ====================== Normalização texto ====================
 def normalize_txt(t: str) -> str:
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
@@ -99,7 +85,7 @@ def norm_heavy(t: str) -> str:
     t = re.sub(r"(?:(?<=\b)[A-Za-z]\s(?=[A-Za-z]))+", lambda m: m.group(0).replace(" ",""), t)
     return t
 
-# ================== Quadrantes / Branco =======================
+# ================== Quadrantes & Página em branco =============
 def quadrants_fitz(rect: fitz.Rect):
     W,H = rect.width, rect.height
     return [
@@ -130,9 +116,9 @@ def quad_is_blank_by_raster(doc: fitz.Document, page_idx: int, clip: fitz.Rect,
     total = sum(hist); white_px = sum(hist[white:256])
     return (white_px/max(total,1)) >= cov
 
-# ====================== Pedido (ID) ===========================
-ORDER_NEAR  = re.compile(r"(?:ID\s*PEDIDO|PEDIDO|Nº\s*PEDIDO)[:\s#-]*((?:[A-Z0-9]\s*){8,24})", re.I)
-ORDER_TOKEN = re.compile(r"\b([A-Z0-9]{10,24})\b")
+# ====================== Pedido (ID) etiqueta ==================
+ORDER_NEAR = re.compile(r"(?:ID\s*PEDIDO|PEDIDO|Nº\s*PEDIDO)[:\s#-]*((?:[A-Z0-9]\s*){8,24})", re.I)
+ORDER_TOKEN= re.compile(r"\b([A-Z0-9]{10,24})\b")
 
 def extract_order(text: str) -> str:
     up = norm_heavy(text).upper()
@@ -147,7 +133,8 @@ def extract_order(text: str) -> str:
             return tok
     return ""
 
-# =================== Lista por COLUNAS ========================
+# =================== Parser da LISTA por colunas ==============
+# SKU precisa ter letras + números (evita códigos da etiqueta tipo LGO-92, SP2)
 SKU_TOKEN_RE = re.compile(r"\b(?=[A-Z0-9\-\/\.]{3,32}\b)(?=.*[A-Z])(?=.*\d)[A-Z0-9\-\/\.]+\b", re.I)
 
 def get_words(page: fitz.Page, rect: fitz.Rect):
@@ -166,6 +153,7 @@ def get_words(page: fitz.Page, rect: fitz.Rect):
     return words
 
 def group_by_lines(words, y_tol=3.5):
+    """Agrupa 'words' em linhas (corrigido)."""
     lines = []
     for w in words:
         if not lines:
@@ -302,31 +290,42 @@ def extract_list_by_lines(text: str) -> list[str]:
     return items
 
 # ======================== Pipeline ============================
-def process_pdf(pdf_bytes: bytes):
+def process_pdf(pdf_bytes: bytes, diagnostic=False):
     reader = PdfReader(io.BytesIO(pdf_bytes))
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    label_quads, list_quads = [], []
+    label_quads = []
+    list_quads  = []
+    diag_rows = []
 
     for i in range(len(doc)):
         p_fitz = doc[i]
         qf = quadrants_fitz(p_fitz.rect)
         qp = quadrants_pypdf(reader.pages[i].mediabox)
-        for rect_fitz, box_pdf in zip(qf, qp):
+
+        for qidx, (rect_fitz, box_pdf) in enumerate(zip(qf, qp)):
             txt = p_fitz.get_text("text", clip=rect_fitz) or ""
-            # tenta lista (colunas)
+
+            # tenta lista (colunas → fallback textual)
             prods = extract_list_by_columns(p_fitz, rect_fitz)
-            if not prods:  # fallback textual
+            if not prods:
                 prods = extract_list_by_lines(txt)
             if prods:
                 list_quads.append(dict(page_idx=i, pypdf_box=box_pdf, fitz_rect=rect_fitz, text=txt, items=prods))
-                continue
-            # etiqueta
-            if REMOVE_BLANK and quad_is_blank_by_raster(doc, i, rect_fitz):
-                continue
-            label_quads.append(dict(page_idx=i, pypdf_box=box_pdf, fitz_rect=rect_fitz, text=txt))
+                typ = "list"
+            else:
+                # etiqueta
+                if REMOVE_BLANK and quad_is_blank_by_raster(doc, i, rect_fitz):
+                    continue
+                label_quads.append(dict(page_idx=i, pypdf_box=box_pdf, fitz_rect=rect_fitz, text=txt))
+                typ = "label"
 
-    # recorta etiquetas
+            if diagnostic:
+                pedido = extract_order(txt) or ""
+                sample = norm_heavy(txt)[:120]
+                diag_rows.append({"page": i+1, "quad": qidx+1, "tipo": typ, "pedido": pedido, "amostra": sample})
+
+    # recorta etiquetas (fallback 4→1 puro se nenhuma encontrada)
     if not label_quads:
         w = PdfWriter()
         for i in range(len(reader.pages)):
@@ -336,18 +335,20 @@ def process_pdf(pdf_bytes: bytes):
                 p = deepcopy(page); rect = RectangleObject([x0,y0,x1,y1])
                 p.cropbox = rect; p.mediabox = rect; w.add_page(p)
         out = io.BytesIO(); w.write(out); out.seek(0)
-        return out.getvalue()
+        return out.getvalue(), pd.DataFrame(diag_rows)
 
+    # Recorta todas as etiquetas em ordem
     w = PdfWriter()
     for lab in label_quads:
         psrc = reader.pages[lab["page_idx"]]
         x0,y0,x1,y1 = lab["pypdf_box"]
-        p = deepcopy(psrc); rect = RectangleObject([x0,y0,x1,y1])
+        p = deepcopy(psrc)
+        rect = RectangleObject([x0,y0,x1,y1])
         p.cropbox = rect; p.mediabox = rect; w.add_page(p)
     tmp = io.BytesIO(); w.write(tmp); tmp.seek(0)
     cropped = fitz.open(stream=tmp.getvalue(), filetype="pdf")
 
-    # listas indexadas
+    # Pareamento etiqueta ↔ lista
     lists_by_order = {}
     lists_in_order = []
     for lst in list_quads:
@@ -370,6 +371,7 @@ def process_pdf(pdf_bytes: bytes):
             items = lists_in_order[idx_free][:MAX_LINES] if idx_free < len(lists_in_order) else []
             if idx_free < len(lists_in_order): idx_free += 1
 
+        # altura extra do rodapé
         lines_count = 1 + max(1, len(items))
         min_area = PAD_Y_PT*2 + (FONT_SIZE+2)*lines_count
         extra_h = max(r.height*OVERLAY_HEIGHT_PCT, min_area)
@@ -381,110 +383,64 @@ def process_pdf(pdf_bytes: bytes):
         new_pg.insert_textbox(box, text, fontname="helv", fontsize=FONT_SIZE, align=0)
 
     out = io.BytesIO(); final_doc.save(out); final_doc.close(); out.seek(0)
-    return out.getvalue()
 
-# ====================== Downloader por URL ====================
-def parse_headers_text(cookie_header: str, extra_headers: str):
-    headers = {}
-    if cookie_header.strip():
-        headers["Cookie"] = cookie_header.strip()
-    if extra_headers.strip():
-        for line in extra_headers.splitlines():
-            if ":" in line:
-                k,v = line.split(":",1)
-                headers[k.strip()] = v.strip()
-    # user-agent padrão pra evitar bloqueio bobo
-    headers.setdefault("User-Agent","Mozilla/5.0")
-    return headers
+    # Diagnóstico opcional
+    diag_df = pd.DataFrame(diag_rows)
+    if diagnostic:
+        # CSV
+        csv_buf = io.StringIO()
+        diag_df.to_csv(csv_buf, index=False)
+        st.download_button("Baixar DIAGNÓSTICO (CSV)",
+                           data=csv_buf.getvalue().encode("utf-8"),
+                           file_name="diagnostico_quadrantes.csv",
+                           mime="text/csv")
+        # PDF preview com caixas
+        prev = fitz.open(stream=pdf_bytes, filetype="pdf")
+        mark = fitz.open()
+        red   = (1,0,0); green = (0,0.6,0)
+        for i in range(len(prev)):
+            pg = mark.new_page(width=prev[i].rect.width, height=prev[i].rect.height)
+            pg.show_pdf_page(prev[i].rect, prev, i)
+            for blk in label_quads:
+                if blk["page_idx"]==i: pg.draw_rect(blk["fitz_rect"], color=green, width=1)
+            for blk in list_quads:
+                if blk["page_idx"]==i: pg.draw_rect(blk["fitz_rect"], color=red, width=1)
+        pb = io.BytesIO(); mark.save(pb); mark.close(); pb.seek(0)
+        st.download_button("Baixar PREVIEW (PDF com caixas)", data=pb.getvalue(),
+                           file_name="preview_caixas.pdf", mime="application/pdf")
 
-def filename_from_url(url: str) -> str:
-    path = unquote(urlparse(url).path)
-    name = Path(path).name or "arquivo.pdf"
-    return name
-
-def fetch_urls_to_pdfs(urls: list[str], cookie_header: str, extra_headers: str):
-    """
-    Baixa URLs. Se ZIP, extrai PDFs. Retorna lista de (nome_arquivo, bytes_pdf).
-    """
-    headers = parse_headers_text(cookie_header, extra_headers)
-    out = []
-    for url in urls:
-        url = url.strip()
-        if not url: continue
-        try:
-            with requests.get(url, headers=headers, timeout=30, allow_redirects=True) as r:
-                r.raise_for_status()
-                content = r.content
-                fname = filename_from_url(url)
-                ctype = r.headers.get("Content-Type","").lower()
-
-                if fname.lower().endswith(".zip") or "zip" in ctype:
-                    zf = zipfile.ZipFile(io.BytesIO(content))
-                    for zname in zf.namelist():
-                        if zname.lower().endswith(".pdf"):
-                            out.append((Path(zname).name, zf.read(zname)))
-                elif fname.lower().endswith(".pdf") or "pdf" in ctype:
-                    out.append((fname if fname.lower().endswith(".pdf") else fname + ".pdf", content))
-                else:
-                    st.warning(f"URL não parece PDF/ZIP: {url}")
-        except Exception as e:
-            st.error(f"Falha ao baixar {url}: {e}")
-    return out
+    return out.getvalue(), diag_df
 
 # =========================== RUN =============================
-def run_from_upload(files):
-    results = []
-    for f in files:
-        try:
-            pdf_in = f.getvalue()
-            pdf_out = process_pdf(pdf_in)
-            results.append((f.name, pdf_out))
-        except Exception as e:
-            st.error(f"Erro processando {f.name}: {e}")
-    return results
-
-def run_from_urls(text_urls, cookie_header, extra_headers):
-    urls = [u.strip() for u in text_urls.splitlines() if u.strip()]
-    pairs = fetch_urls_to_pdfs(urls, cookie_header, extra_headers)
-    results = []
-    for name, pdf_bytes in pairs:
-        try:
-            pdf_out = process_pdf(pdf_bytes)
-            results.append((name, pdf_out))
-        except Exception as e:
-            st.error(f"Erro processando {name}: {e}")
-    return results
-
 if process_btn:
-    if src == "Upload de PDF(s)":
-        if not uploaded_files:
-            st.warning("Selecione pelo menos um PDF.")
-        else:
-            with st.spinner("Processando..."):
-                results = run_from_upload(uploaded_files)
+    if not uploaded_files:
+        st.warning("Selecione pelo menos um PDF.")
     else:
-        if not urls_text.strip():
-            st.warning("Cole pelo menos um link.")
-        else:
-            with st.spinner("Baixando e processando..."):
-                results = run_from_urls(urls_text, cookie_header, custom_headers)
+        with st.spinner("Processando..."):
+            results = []
+            for f in uploaded_files:
+                try:
+                    pdf_out, diag_df = process_pdf(f.getvalue(), diagnostic=show_diag)
+                    results.append((f.name, pdf_out))
+                except Exception as e:
+                    st.error(f"Erro processando {f.name}: {e}")
 
-    # Saída (um ou vários)
-    if 'results' in locals() and results:
-        if len(results) == 1:
-            name, data = results[0]
-            base = Path(name).stem + "_processado.pdf"
-            st.success("Pronto! 1 etiqueta por página, com a lista (QNT × SKU) no rodapé.")
-            st.download_button("Baixar PDF", data=data, file_name=base, mime="application/pdf")
-        else:
-            # zipa
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
-                for name, data in results:
-                    base = Path(name).stem + "_processado.pdf"
-                    z.writestr(base, data)
-            buf.seek(0)
-            st.success(f"Pronto! {len(results)} arquivos processados.")
-            st.download_button("Baixar todos (ZIP)", data=buf.getvalue(), file_name="etiquetas_processadas.zip", mime="application/zip")
+        if results:
+            if len(results) == 1:
+                name, data = results[0]
+                base = Path(name).stem + "_processado.pdf"
+                st.success("Pronto! 1 etiqueta por página, com a lista (QNT × SKU) no rodapé.")
+                st.download_button("Baixar PDF", data=data, file_name=base, mime="application/pdf")
+            else:
+                import zipfile
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                    for name, data in results:
+                        base = Path(name).stem + "_processado.pdf"
+                        z.writestr(base, data)
+                buf.seek(0)
+                st.success(f"Pronto! {len(results)} arquivos processados.")
+                st.download_button("Baixar todos (ZIP)", data=buf.getvalue(),
+                                   file_name="etiquetas_processadas.zip", mime="application/zip")
 else:
-    st.info("Envie PDF(s) por upload **ou** cole os link(s) e clique em **Baixar e Processar**.")
+    st.info("Faça upload de um ou mais PDFs e clique em **Processar**.")

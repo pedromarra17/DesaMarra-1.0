@@ -257,19 +257,21 @@ def draw_list_vector(page_out: fitz.Page, x, y, width, max_height, rows,
 # ---------------- Modo: APENAS ETIQUETA (4→1 robusto com PyMuPDF) ----------------
 def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False):
     """
-    Divide páginas 4-up em 4 etiquetas individuais, fazendo
-    apenas trim por raster no quadrante (robusto p/ casos sem texto).
-    Evita 'coluna vertical' com salvaguardas de largura/altura mínimas.
+    Divide páginas 4-up em 4 etiquetas individuais com trim por raster.
+    Corrige páginas rotacionadas (90°/270°) aplicando rotate na inserção.
+    Evita 'coluna vertical' com salvaguardas de tamanho e rotação.
     """
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     out = fitz.open()
     rows = []
 
-    MIN_RATIO = 0.20      # bb tem que ter pelo menos 20% da largura/altura do quadrante
+    MIN_RATIO = 0.20      # bb precisa ter >= 20% da largura/altura do quadrante
     MIN_ABS   = 30.0      # e pelo menos 30 pt (~10 mm) de lado
 
     for i in range(len(src)):
-        p = src[i]; R = p.rect
+        p = src[i]
+        R = p.rect
+        # quadrantes 2x2
         quads = [
             fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, (R.y0+R.y1)/2),
             fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, (R.y0+R.y1)/2),
@@ -278,28 +280,48 @@ def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False):
         ]
 
         for qi, q in enumerate(quads, start=1):
-            # 1) se o quadrante for "branco", pula
+            # pula quadrante branco
             if quad_is_blank_by_raster(src, i, q):
                 continue
 
-            # 2) trim apenas por raster (robusto p/ páginas sem texto)
+            # trim por raster (robusto; não depende de texto)
             bb = trim_bbox_by_raster(src, i, q, dpi=220, white=245, cov=0.997, pad_pt=1.0)
 
-            # 3) salvaguardas contra BB muito estreito/baixo
-            if bb.width  < max(q.width  * MIN_RATIO, MIN_ABS) or \
-               bb.height < max(q.height * MIN_RATIO, MIN_ABS):
-                # fallback: use o quadrante original (sem trim)
+            # salvaguardas – se sair bizarro, usa o quadrante original
+            if (bb.width  < max(q.width  * MIN_RATIO, MIN_ABS)) or \
+               (bb.height < max(q.height * MIN_RATIO, MIN_ABS)):
                 bb = q
 
-            # 4) cria página do tamanho do recorte e coloca a etiqueta
-            newp = out.new_page(width=bb.width, height=bb.height)
-            newp.show_pdf_page(fitz.Rect(0, 0, bb.width, bb.height), src, i, clip=bb)
+            # ======= correção de rotação / “coluna” =======
+            # se a bbox ficar muito estreita (altura muito maior que largura),
+            # assume que precisa girar 90° para caber deitado
+            w, h = bb.width, bb.height
+            aspect = w / h if h > 0 else 1.0
+
+            rotate = 0
+            new_w, new_h = w, h
+
+            # heurística: “estreito demais” → gira 90 graus
+            if aspect < 0.6:
+                rotate = 90
+                new_w, new_h = h, w
+            # “muito largo” e deitado ao contrário → gira 270 (raro, mas previne)
+            elif aspect > 3.0 and p.rotation in (270,):
+                rotate = 270
+                new_w, new_h = h, w
+
+            # cria página do tamanho do recorte (ajustado)
+            newp = out.new_page(width=new_w, height=new_h)
+            # insere o conteúdo rotacionado quando necessário
+            newp.show_pdf_page(fitz.Rect(0, 0, new_w, new_h), src, i, clip=bb, rotate=rotate)
 
             if diagnostic:
                 rows.append({
                     "src_page": i+1, "quad": qi,
+                    "page_rot": getattr(p, "rotation", 0),
                     "q_w": round(q.width,1), "q_h": round(q.height,1),
-                    "bb_w": round(bb.width,1), "bb_h": round(bb.height,1)
+                    "bb_w": round(w,1), "bb_h": round(h,1),
+                    "aspect": round(aspect,2), "rotate_used": rotate
                 })
 
     buf = io.BytesIO()

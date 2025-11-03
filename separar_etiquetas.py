@@ -12,7 +12,7 @@ from PIL import Image
 import pandas as pd
 
 # ============================= UI / THEME =============================
-st.set_page_config(page_title="Etiquetas Shopee – 4→1 / Empacotamento", layout="wide")
+st.set_page_config(page_title="Separação de Etiquetas Shopee – 4→1 / Empacotamento", layout="wide")
 st.markdown("""
 <style>
 #MainMenu, footer {visibility:hidden;}

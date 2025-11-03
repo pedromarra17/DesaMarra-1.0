@@ -336,14 +336,25 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
         left  = fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, R.y1)
         right = fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, R.y1)
         for ci, col in enumerate([left, right], start=1):
-            # localizar o topo do 'Checklist de carregamento' dentro da coluna
+            # localizar o topo do 'Checklist de carregamento' dentro da coluna (robusto p/ 7 ou 8 campos)
             txt_col = pg.get_text("blocks", clip=col)
             checklist_top = None
-            for x0,y0,x1,y1,txt,_,_,_ in txt_col:
+            for b in txt_col:
+                x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+                txt = b[4] if len(b) >= 5 else ""
                 if "CHECKLIST" in norm_heavy(str(txt)).upper():
-                    checklist_top = y0; break
+                    checklist_top = y0
+                    break
             if checklist_top is None:
-                # fallback: usa 62% da coluna como quebra etiqueta/lista
+                # fallback: procura também por 'ID Pedido' como pista de início da lista
+                for b in txt_col:
+                    x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+                    txt = b[4] if len(b) >= 5 else ""
+                    if "ID PEDIDO" in norm_heavy(str(txt)).upper():
+                        checklist_top = y0
+                        break
+            if checklist_top is None:
+                # fallback final: usa 62% da coluna como quebra etiqueta/lista
                 checklist_top = col.y0 + (col.height * 0.62)
 
             # etiqueta = da borda superior até um pouco acima do checklist
@@ -359,13 +370,9 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
             if REMOVE_BLANK and quad_is_blank_by_raster(doc, pi, label_rect) and not items:
                 continue
 
-            # cria página final (etiqueta + rodapé com itens)
-            r = label_rect
-            # renderiza a etiqueta recortando do PDF original
-            # truque: recortamos com pypdf para preservar vetores
+            # recorta a etiqueta preservando vetor com pypdf
             psrc = reader.pages[pi]
             x0,y0,x1,y1 = label_rect.x0, label_rect.y0, label_rect.x1, label_rect.y1
-            # converter para unidades PDF (já estão em pontos)
             p = deepcopy(psrc)
             rect = RectangleObject([x0, y0, x1, y1])
             p.cropbox = rect; p.mediabox = rect
@@ -391,6 +398,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
 
     out=io.BytesIO(); final_doc.save(out); final_doc.close(); out.seek(0)
     return out.getvalue(), pd.DataFrame(diag_rows)
+
 
 # =============================== RUN ===============================
 if process_btn:

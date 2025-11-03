@@ -255,23 +255,21 @@ def draw_list_vector(page_out: fitz.Page, x, y, width, max_height, rows,
     return cursor-y
 
 # ---------------- Modo: APENAS ETIQUETA (4→1 robusto com PyMuPDF) ----------------
-def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False):
+def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False, dpi=200, jpeg_quality=85):
     """
-    Divide páginas 4-up em 4 etiquetas individuais com trim por raster.
-    Corrige páginas rotacionadas (90°/270°) aplicando rotate na inserção.
-    Evita 'coluna vertical' com salvaguardas de tamanho e rotação.
+    Estratégia raster: recorta cada quadrante, faz trim por raster,
+    renderiza em pixmap (DPI definido) e insere como JPEG em nova página.
+    Corrige definitivamente a 'coluna vertical' causada por rotação/mediabox.
     """
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     out = fitz.open()
     rows = []
 
-    MIN_RATIO = 0.20      # bb precisa ter >= 20% da largura/altura do quadrante
-    MIN_ABS   = 30.0      # e pelo menos 30 pt (~10 mm) de lado
+    MIN_RATIO = 0.20     # bbox precisa ter >= 20% da largura/altura do quadrante
+    MIN_ABS   = 30.0     # e pelo menos 30 pt
 
     for i in range(len(src)):
-        p = src[i]
-        R = p.rect
-        # quadrantes 2x2
+        p = src[i]; R = p.rect
         quads = [
             fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, (R.y0+R.y1)/2),
             fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, (R.y0+R.y1)/2),
@@ -284,44 +282,34 @@ def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False):
             if quad_is_blank_by_raster(src, i, q):
                 continue
 
-            # trim por raster (robusto; não depende de texto)
+            # trim por raster (robusto)
             bb = trim_bbox_by_raster(src, i, q, dpi=220, white=245, cov=0.997, pad_pt=1.0)
 
-            # salvaguardas – se sair bizarro, usa o quadrante original
+            # salvaguardas
             if (bb.width  < max(q.width  * MIN_RATIO, MIN_ABS)) or \
                (bb.height < max(q.height * MIN_RATIO, MIN_ABS)):
-                bb = q
+                bb = q  # volta ao quadrante
 
-            # ======= correção de rotação / “coluna” =======
-            # se a bbox ficar muito estreita (altura muito maior que largura),
-            # assume que precisa girar 90° para caber deitado
-            w, h = bb.width, bb.height
-            aspect = w / h if h > 0 else 1.0
+            # --- RENDERIZAÇÃO RASTER ---
+            scale = dpi / 72.0
+            pix = p.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=bb, alpha=False)
+            if pix.width == 0 or pix.height == 0:
+                continue
 
-            rotate = 0
-            new_w, new_h = w, h
+            # tamanho da página em pontos (72pt = 1 polegada)
+            w_pt = pix.width  * (72.0 / dpi)
+            h_pt = pix.height * (72.0 / dpi)
 
-            # heurística: “estreito demais” → gira 90 graus
-            if aspect < 0.6:
-                rotate = 90
-                new_w, new_h = h, w
-            # “muito largo” e deitado ao contrário → gira 270 (raro, mas previne)
-            elif aspect > 3.0 and p.rotation in (270,):
-                rotate = 270
-                new_w, new_h = h, w
-
-            # cria página do tamanho do recorte (ajustado)
-            newp = out.new_page(width=new_w, height=new_h)
-            # insere o conteúdo rotacionado quando necessário
-            newp.show_pdf_page(fitz.Rect(0, 0, new_w, new_h), src, i, clip=bb, rotate=rotate)
+            # cria página e insere o JPEG ocupando toda a área
+            page_new = out.new_page(width=w_pt, height=h_pt)
+            img_stream = pix.tobytes("jpeg", quality=jpeg_quality)
+            page_new.insert_image(fitz.Rect(0, 0, w_pt, h_pt), stream=img_stream)
 
             if diagnostic:
                 rows.append({
                     "src_page": i+1, "quad": qi,
-                    "page_rot": getattr(p, "rotation", 0),
-                    "q_w": round(q.width,1), "q_h": round(q.height,1),
-                    "bb_w": round(w,1), "bb_h": round(h,1),
-                    "aspect": round(aspect,2), "rotate_used": rotate
+                    "bb_w": round(bb.width,1), "bb_h": round(bb.height,1),
+                    "pix_w": pix.width, "pix_h": pix.height, "dpi": dpi
                 })
 
     buf = io.BytesIO()

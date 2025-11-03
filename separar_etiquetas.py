@@ -44,6 +44,7 @@ st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Separação de Etiqu
 mode = st.radio("Escolha o tipo de PDF:", ["Apenas Etiquetas", "Etiquetas com Lista de Empacotamento"], horizontal=True)
 st.divider()
 uploaded_files = st.file_uploader("Selecione PDF(s) da Shopee", type=["pdf"], accept_multiple_files=True)
+show_diag = st.toggle("", value=False)
 process_btn = st.button("Processar")
 
 # ========================= Constantes / Utils =========================

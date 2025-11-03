@@ -39,7 +39,7 @@ def show_logo_center(width_px: int = 650):
         )
 
 show_logo_center()
-st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Etiquetas Shopee</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Separação de Etiquetas Shopee</h1>", unsafe_allow_html=True)
 
 mode = st.radio("Escolha o tipo de PDF:", ["Apenas Etiquetas", "Etiquetas com Lista de Empacotamento"], horizontal=True)
 st.divider()

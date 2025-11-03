@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).parent
 LOGO_LIGHT = BASE_DIR / "logo_light.png"
 LOGO_DARK  = BASE_DIR / "logo_dark.png"
 
-def show_logo_center(width_px: int = 420):
+def show_logo_center(width_px: int = 650):
     theme_base = st.get_option("theme.base") or "light"
     logo_path = LOGO_LIGHT if theme_base == "light" else LOGO_DARK
     if not logo_path.exists():

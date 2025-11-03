@@ -169,49 +169,117 @@ def nearest_group(groups, x, max_dx=65):
 
 def extract_items_QNTxSKU(page: fitz.Page, rect: fitz.Rect, max_lines=MAX_LINES):
     """
-    Extrai '- QNTx SKU' de uma região tipo 'Checklist de carregamento' (ou lista por colunas).
+    Extrai '- QNTx SKU' de uma região tipo 'Checklist de carregamento' (ou lista por colunas),
+    com tolerâncias ampliadas para layouts onde as linhas quebram logo abaixo do cabeçalho.
     """
-    words = words_from(page, rect)
+    # tolerâncias mais generosas
+    Y_TOL   = 5.0       # antes ~3.5
+    MAX_DX  = 120       # antes 65
+    SKIP_HDR_PAD = 8.0  # pular tudo que estiver até 8 pts abaixo do cabeçalho
+
+    def _words(rect_):
+        ws = page.get_text("words", clip=rect_)
+        words=[]
+        for x0,y0,x1,y1,w,*_ in ws:
+            t = str(w).strip()
+            if not t: continue
+            words.append({
+                "x0":x0,"y0":y0,"x1":x1,"y1":y1,
+                "xc":(x0+x1)/2,"yc":(y0+y1)/2,"h":(y1-y0),
+                "t":norm_heavy(t).upper()
+            })
+        words.sort(key=lambda k:(round(k["yc"],1),k["x0"]))
+        return words
+
+    def _group_by_lines(words):
+        lines=[]
+        for w in words:
+            if not lines: lines.append([w]); continue
+            last=lines[-1]; ly=sum(x["yc"] for x in last)/len(last)
+            (last.append(w) if abs(w["yc"]-ly)<=Y_TOL else lines.append([w]))
+        return lines
+
+    def _merge_letters(line, gap_factor=0.75):
+        if not line: return []
+        avg_h=sum(w["h"] for w in line)/len(line); gap=avg_h*gap_factor
+        out=[]; cur=None
+        for w in sorted(line,key=lambda k:k["x0"]):
+            if cur is None: cur=dict(w)
+            elif w["x0"]-cur["x1"]<=gap:
+                cur["x1"]=max(cur["x1"],w["x1"]); cur["xc"]=(cur["x0"]+cur["x1"])/2; cur["t"]=(cur["t"]+" "+w["t"]).strip()
+            else: out.append(cur); cur=dict(w)
+        if cur: out.append(cur)
+        return out
+
+    def _find_header(lines):
+        for ln in lines:
+            g = _merge_letters(ln)
+            txts = [x["t"] for x in g]
+            has_sku = any("SKU" in t for t in txts)
+            has_qnt = any((t=="QNT") or (t=="QTD") or (t=="QTDE") or ("QUANTIDADE" in t) for t in txts)
+            has_prod= any("PRODUTO" in t for t in txts)
+            if has_sku and has_qnt and has_prod:
+                cols={}
+                for x in g:
+                    if "SKU" in x["t"]: cols["SKU"]=x["xc"]
+                    if (x["t"] in ("QNT","QTD","QTDE")) or ("QUANTIDADE" in x["t"]): cols["QNT"]=x["xc"]
+                cols["y"]=g[0]["yc"]
+                if "SKU" in cols and "QNT" in cols:
+                    return cols
+        return {}
+
+    def _nearest(groups, x):
+        best,bd=None,1e9
+        for g in groups:
+            d=abs(g["xc"]-x)
+            if d<bd: bd,best=d,g
+        return best if bd<=MAX_DX else None
+
+    words = _words(rect)
     if not words: return []
-    lines = group_by_lines(words)
-    cols  = find_header_cols(lines)
+
+    lines = _group_by_lines(words)
+    cols  = _find_header(lines)
+
+    # Se não achou colunas, cai no fallback textual:
     if not cols:
-        # fallback puramente textual linha-a-linha
         raw = norm_heavy(page.get_text("text", clip=rect))
-        if not ("SKU" in raw and ("QNT" in raw or "QTD" in raw or "QTDE" in raw)): return []
+        if not (("SKU" in raw) and (("QNT" in raw) or ("QTD" in raw) or ("QTDE" in raw) or ("QUANTIDADE" in raw))):
+            return []
         items=[]
         for ln in [l.strip() for l in raw.splitlines() if l.strip()]:
-            base=norm_heavy(ln)
-            mqty = re.search(r"(?:QNT|QTD|QTDE|QUANTIDADE)\s*[:x\-]*\s*(\d{1,3})", base, re.I) \
+            base = norm_heavy(ln)
+            # QNT
+            m = re.search(r"(?:QNT|QTD|QTDE|QUANTIDADE)\s*[:x\-]*\s*(\d{1,3})", base, re.I) \
                 or re.search(r"\b(\d{1,3})\s*x\b", base, re.I) \
                 or re.search(r"\bx\s*(\d{1,3})\b", base, re.I)
-            qty = int((mqty.group(1) if mqty else "1"))
-            msku= re.search(r"\bS\s*K\s*U[:\s\-]*([A-Z0-9\s\-\/\.]{3,})", base, re.I)
+            q = int(m.group(1)) if m else 1
+            # SKU
+            msku = re.search(r"\bS\s*K\s*U[:\s\-]*([A-Z0-9\s\-\/\.]{3,})", base, re.I)
             sku=None
             if msku:
                 cand=re.sub(r"\s+","", msku.group(1)); mt=SKU_TOKEN_RE.search(cand); sku=mt.group(0) if mt else None
             if not sku:
                 mt=SKU_TOKEN_RE.search(base); sku=mt.group(0) if mt else None
             if sku:
-                it=f"- {qty}x {sku}"
-                if it not in items: items.append(it)
+                item=f"- {q}x {sku}"
+                if item not in items: items.append(item)
             if len(items)>=max_lines: break
         return items
 
-    # com colunas
+    # Com cabeçalho detectado
     items=[]
-    header_y = cols["y"]
+    hdr_y = cols["y"] + SKIP_HDR_PAD
     for ln in lines:
-        if not ln or ln[0]["yc"] <= header_y + 2:  # pula cabeçalho
+        if not ln or ln[0]["yc"] <= hdr_y:
             continue
-        groups  = merge_letters(ln)
+        groups = _merge_letters(ln)
         line_tx = " ".join(g["t"] for g in groups)
-        if "CHECKLIST" in line_tx or "CORTE" in line_tx: break
 
-        gq = nearest_group(groups, cols["QNT"])
-        gs = nearest_group(groups, cols["SKU"])
-        if not gq and not gs: continue
+        gq = _nearest(groups, cols["QNT"])
+        gs = _nearest(groups, cols["SKU"])
 
+        # quantidade
         qty=None
         if gq:
             m=re.search(r"\b(\d{1,3})\b", gq["t"])
@@ -219,8 +287,12 @@ def extract_items_QNTxSKU(page: fitz.Page, rect: fitz.Rect, max_lines=MAX_LINES)
         if qty is None:
             m=re.search(r"\b(\d{1,3})\s*x\b|\bx\s*(\d{1,3})\b", line_tx, re.I)
             if m: qty=int(m.group(1) or m.group(2))
+        if qty is None:
+            m=re.search(r"(?:QNT|QTD|QTDE|QUANTIDADE)\s*[:x\-]*\s*(\d{1,3})", line_tx, re.I)
+            if m: qty=int(m.group(1))
         if qty is None: qty=1
 
+        # sku
         sku=None
         if gs:
             mt=SKU_TOKEN_RE.search(gs["t"])
@@ -229,8 +301,11 @@ def extract_items_QNTxSKU(page: fitz.Page, rect: fitz.Rect, max_lines=MAX_LINES)
             mt=SKU_TOKEN_RE.search(line_tx)
             if mt: sku=mt.group(0)
 
-        if sku: items.append(f"- {qty}x {sku}")
-        if len(items)>=max_lines: break
+        # Só registra se realmente encontrar SKU
+        if sku:
+            items.append(f"- {qty}x {sku}")
+            if len(items)>=max_lines: break
+
     return items
 
 # ========================= MODO 1: 4 etiquetas =========================

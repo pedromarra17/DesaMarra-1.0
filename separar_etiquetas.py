@@ -213,9 +213,10 @@ def process_mode_4up(pdf_bytes: bytes, diagnostic=False):
 def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
     """
     Empacotamento (2 colunas por página) -> 1 página 10x15 cm (somente vetor):
-      • Recorta ETIQUETA (em cima) com trim de espaços brancos (raster só p/ medir).
+      • Recorta ETIQUETA (em cima) com trim de espaços brancos.
       • Recorta LISTA (embaixo), remove coluna '#', e aperta à direita (remove espaço morto).
-      • Calcula escala única p/ caber em largura e altura; desenha ambos como vetor.
+      • Ajuste novo: ambos TENTAM usar a largura total; se estourar a altura, aplica-se um
+        fator de compressão único (mantendo proporção) para caber em 10x15.
     """
     H_PAD = 0.0
     V_PAD = 0.0
@@ -281,7 +282,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
             label_clip_blk = content_bbox(pg, label_raw)
             list_clip      = content_bbox(pg, list_raw)
 
-            # 6) Trim apertado na ETIQUETA (remove bordas brancas incluindo códigos/QR)
+            # 6) Trim mais apertado na ETIQUETA (remove bordas brancas incluindo códigos/QR)
             label_clip = trim_bbox_by_raster(src, pi, label_clip_blk, dpi=220, white=245, cov=0.997, pad_pt=1.0)
 
             # 7) Aperta a borda direita da LISTA (remove espaço morto após 'Quantidade')
@@ -291,7 +292,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
             if REMOVE_BLANK and quad_is_blank_by_raster(src, pi, label_clip):
                 continue
 
-            # 9) Mede e calcula escala única para caber em 10x15
+            # 9) Mede e tenta usar a largura total para AMBOS
             lw, lh = label_clip.width, label_clip.height
             if quad_is_blank_by_raster(src, pi, list_clip):
                 use_list = False; tw, th = lw, 0
@@ -301,36 +302,58 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
             content_w = TARGET_W_PT - 2*H_PAD
             content_h = TARGET_H_PT - 2*V_PAD
 
-            s_w = content_w / max(lw, tw)
-            h_sum = lh * s_w + (th * s_w if use_list else 0)
-            s = s_w if h_sum <= content_h else s_w * (content_h / h_sum)
+            # escalas independentes para ENCHER a largura
+            sL = content_w / lw
+            sT = content_w / tw if use_list else sL
 
-            Lw, Lh = lw*s, lh*s
-            Tw, Th = (tw*s, th*s) if use_list else (0,0)
+            # alturas se ambos preencherem a largura
+            HL = lh * sL
+            HT = th * sT if use_list else 0.0
+            Hsum_full = HL + HT
 
-            # 10) Cria página 10x15 e desenha vetor
+            # se couber, ótimo; se não, aplica fator comum 'c'
+            if Hsum_full <= content_h or Hsum_full == 0:
+                c = 1.0
+            else:
+                c = content_h / Hsum_full
+
+            # dimensões finais após possível compressão
+            Lw, Lh = content_w * c, HL * c
+            Tw, Th = (content_w * c, HT * c) if use_list else (0, 0)
+
+            # 10) cria página 10x15 e desenha vetor
             pg_new = out_doc.new_page(width=TARGET_W_PT, height=TARGET_H_PT)
-            x = (TARGET_W_PT - max(Lw, Tw)) / 2
+            x = (TARGET_W_PT - Lw) / 2  # os dois terão mesma largura final
             y = V_PAD
 
-            pg_new.show_pdf_page(fitz.Rect(x, y, x+Lw, y+Lh), src, pi, clip=label_clip)
+            # etiqueta
+            pg_new.show_pdf_page(
+                fitz.Rect(x, y, x+Lw, y+Lh),
+                src, pi, clip=label_clip
+            )
             y += Lh
+
+            # lista
             if use_list and Th > 0.5:
-                pg_new.show_pdf_page(fitz.Rect(x, y, x+Tw, y+Th), src, pi, clip=list_clip)
+                pg_new.show_pdf_page(
+                    fitz.Rect(x, y, x+Tw, y+Th),
+                    src, pi, clip=list_clip
+                )
 
             if diagnostic:
                 diag_rows.append({
-                    "src_page": pi+1, "col": ci, "scale": round(s,3),
-                    "label_rect": f"{round(label_clip.x0,1)},{round(label_clip.y0,1)}-{round(label_clip.x1,1)},{round(label_clip.y1,1)}",
-                    "list_rect":  f"{round(list_clip.x0,1)},{round(list_clip.y0,1)}-{round(list_clip.x1,1)},{round(list_clip.y1,1)}",
+                    "src_page": pi+1, "col": ci,
+                    "sL": round(sL,3), "sT": round(sT,3), "c": round(c,3),
+                    "Lw": round(Lw,1), "Lh": round(Lh,1),
+                    "Tw": round(Tw,1), "Th": round(Th,1),
                 })
 
-    # 11) Salva comprimido
     buf = io.BytesIO()
     out_doc.save(buf, garbage=4, deflate=True)
     out_doc.close()
     buf.seek(0)
     return buf.getvalue(), pd.DataFrame(diag_rows)
+
 
 # ================================= RUN =================================
 if process_btn:

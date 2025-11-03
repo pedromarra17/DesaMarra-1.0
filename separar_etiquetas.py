@@ -8,7 +8,7 @@ import base64, io, re, unicodedata
 import pandas as pd
 import fitz  # PyMuPDF
 
-# ---------------- UI / Branding ----------------
+# ============================= UI / BRAND =============================
 st.set_page_config(page_title="Etiquetas Shopee – Marra", layout="wide")
 st.markdown("""
 <style>
@@ -35,13 +35,23 @@ def show_logo_center(px=420):
 show_logo_center()
 st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Etiquetas Shopee</h1>", unsafe_allow_html=True)
 
-mode = st.radio("Escolha o tipo de PDF:", ["Apenas etiqueta", "Etiqueta com lista de empacotamento"], horizontal=True)
+col_header = st.columns([1,1,1,2.2])
+with col_header[0]:
+    mode = st.radio("Tipo de PDF:", ["Apenas etiqueta", "Etiqueta com lista de empacotamento"], horizontal=False)
+with col_header[1]:
+    diag = st.toggle("Modo diagnóstico", value=False, help="Mostra CSV com informações técnicas.")
+with col_header[2]:
+    dpi_render = st.slider("DPI (raster)", min_value=120, max_value=300, value=200, step=10, help="DPI p/ render (Apenas etiqueta).")
+with col_header[3]:
+    fixed_10x15 = False
+    if mode == "Apenas etiqueta":
+        fixed_10x15 = st.toggle("Fixar saída em 10×15 cm", value=False, help="Encaixa cada etiqueta em uma página 10×15 cm mantendo proporção.")
+
 st.divider()
 files = st.file_uploader("Selecione PDF(s) da Shopee", type=["pdf"], accept_multiple_files=True)
-diag  = st.toggle("Modo diagnóstico (CSV simples)", value=False)
-go    = st.button("Processar")
+go = st.button("Processar")
 
-# ---------------- Constantes ----------------
+# ========================= CONST / HELPERS ============================
 REMOVE_BLANK = True
 DPI_CHECK    = 120
 WHITE_THR    = 245
@@ -52,17 +62,18 @@ MM_PER_IN = 25.4
 def mm_to_pt(mm): return PT_PER_IN * (mm / MM_PER_IN)
 TARGET_W_PT = mm_to_pt(100)  # 10 cm
 TARGET_H_PT = mm_to_pt(150)  # 15 cm
-FONT_NAME   = "helv"         # Helvetica embutida
 
+FONT_NAME   = "helv"         # Helvetica embutida (nome interno do PDF)
 LATIN = r"A-Za-zÀ-ÖØ-öø-ÿ"
 
-# ---------------- Utilidades ----------------
 def normalize_txt(t: str) -> str:
+    import unicodedata, re
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", t).strip()
 
 def collapse_pairs(s: str) -> str:
+    import re
     toks, out, buf = s.split(), [], []
     for t in toks:
         if re.fullmatch(rf"[{LATIN}]{{1,2}}", t): buf.append(t)
@@ -73,6 +84,7 @@ def collapse_pairs(s: str) -> str:
     return " ".join(out)
 
 def norm_heavy(t: str) -> str:
+    import re
     t = normalize_txt(t)
     t = collapse_pairs(t)
     return re.sub(r"(?:(?<=\b)[A-Za-z]\s(?=[A-Za-z]))+", lambda m: m.group(0).replace(" ",""), t)
@@ -103,19 +115,13 @@ def content_bbox(page: fitz.Page, clip: fitz.Rect, pad: float = 2.0) -> fitz.Rec
 def trim_bbox_by_raster(doc: fitz.Document, page_idx: int, rect: fitz.Rect,
                         dpi: int = 200, white: int = 245, cov: float = 0.995,
                         pad_pt: float = 1.5) -> fitz.Rect:
-    """
-    Faz crop fino por rasterização local para remover bordas totalmente brancas.
-    Retorna um fitz.Rect dentro de 'rect' com pequena margem (pad_pt).
-    """
     page = doc[page_idx]
     if rect.width <= 0 or rect.height <= 0:
         return rect
-
     scale = dpi / 72.0
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=rect, alpha=False)
     if pix.width == 0 or pix.height == 0:
         return rect
-
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     g = img.convert("L")
     w, h = g.size
@@ -127,29 +133,24 @@ def trim_bbox_by_raster(doc: fitz.Document, page_idx: int, rect: fitz.Rect,
     def col_is_white(x: int) -> bool:
         return sum(1 for y in range(h) if px[x, y] >= white) / h >= cov
 
-    # varrer topo
     top = 0
     while top < h and row_is_white(top):
         top += 1
     if top == h:
         return rect
 
-    # varrer base
     bottom = h - 1
     while bottom >= 0 and row_is_white(bottom):
         bottom -= 1
 
-    # varrer esquerda
     left = 0
     while left < w and col_is_white(left):
         left += 1
 
-    # varrer direita
     right = w - 1
     while right >= 0 and col_is_white(right):
         right -= 1
 
-    # converter pixels -> pontos
     px2pt = lambda v: (v / dpi) * 72.0
     new_rect = fitz.Rect(
         rect.x0 + px2pt(left) - pad_pt,
@@ -158,7 +159,6 @@ def trim_bbox_by_raster(doc: fitz.Document, page_idx: int, rect: fitz.Rect,
         rect.y0 + px2pt(bottom + 1) + pad_pt,
     )
     return new_rect & rect
-
 
 def tighten_right_edge(page: fitz.Page, doc: fitz.Document, page_idx: int,
                        rect: fitz.Rect, pad_pt: float = 2.0) -> fitz.Rect:
@@ -170,7 +170,7 @@ def tighten_right_edge(page: fitz.Page, doc: fitz.Document, page_idx: int,
     tight = trim_bbox_by_raster(doc, page_idx, rect, dpi=200, white=245, cov=0.997, pad_pt=1.0)
     return fitz.Rect(rect.x0, rect.y0, min(rect.x1, tight.x1), rect.y1)
 
-# -------------- Extrair e redesenhar tabela (empacotamento) --------------
+# ===================== LISTA EMPACOTAMENTO (10x15) ====================
 def find_column_edges_from_header(page: fitz.Page, header_band: fitz.Rect):
     words = page.get_text("words", clip=header_band)
     key = {}
@@ -189,7 +189,6 @@ def extract_list_rows(page: fitz.Page, list_clip: fitz.Rect, col_x: dict):
     x_sku  = col_x.get("sku", x_prod + 120)
     x_var  = col_x.get("variacao", x_sku + 120)
     x_qtd  = col_x.get("qtd", x_var + 120)
-    # agrupa por linha
     lines={}
     for x0,y0,x1,y1,w,*_ in words:
         yc=(y0+y1)/2; bucket=None
@@ -244,7 +243,6 @@ def draw_list_vector(page_out: fitz.Page, x, y, width, max_height, rows,
                 cursor += h_prod * line_gap
             return cursor-y
         size-=0.5
-    # fallback mínimo
     cursor=y
     for r in rows:
         h_prod = tb(fitz.Rect(x, cursor, x+col_w[0], cursor+1e4), r["produto"], min_size, 0)
@@ -254,72 +252,6 @@ def draw_list_vector(page_out: fitz.Page, x, y, width, max_height, rows,
         cursor += h_prod * line_gap
     return cursor-y
 
-# ---------------- Modo: APENAS ETIQUETA (4→1 robusto com PyMuPDF) ----------------
-def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False, dpi=200, jpeg_quality=85):
-    """
-    Estratégia raster: recorta cada quadrante, faz trim por raster,
-    renderiza em pixmap (DPI definido) e insere como JPEG em nova página.
-    Corrige definitivamente a 'coluna vertical' causada por rotação/mediabox.
-    """
-    src = fitz.open(stream=pdf_bytes, filetype="pdf")
-    out = fitz.open()
-    rows = []
-
-    MIN_RATIO = 0.20     # bbox precisa ter >= 20% da largura/altura do quadrante
-    MIN_ABS   = 30.0     # e pelo menos 30 pt
-
-    for i in range(len(src)):
-        p = src[i]; R = p.rect
-        quads = [
-            fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, (R.y0+R.y1)/2),
-            fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, (R.y0+R.y1)/2),
-            fitz.Rect(R.x0, (R.y0+R.y1)/2, (R.x0+R.x1)/2, R.y1),
-            fitz.Rect((R.x0+R.x1)/2, (R.y0+R.y1)/2, R.x1, R.y1),
-        ]
-
-        for qi, q in enumerate(quads, start=1):
-            # pula quadrante branco
-            if quad_is_blank_by_raster(src, i, q):
-                continue
-
-            # trim por raster (robusto)
-            bb = trim_bbox_by_raster(src, i, q, dpi=220, white=245, cov=0.997, pad_pt=1.0)
-
-            # salvaguardas
-            if (bb.width  < max(q.width  * MIN_RATIO, MIN_ABS)) or \
-               (bb.height < max(q.height * MIN_RATIO, MIN_ABS)):
-                bb = q  # volta ao quadrante
-
-            # --- RENDERIZAÇÃO RASTER ---
-            scale = dpi / 72.0
-            pix = p.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=bb, alpha=False)
-            if pix.width == 0 or pix.height == 0:
-                continue
-
-            # tamanho da página em pontos (72pt = 1 polegada)
-            w_pt = pix.width  * (72.0 / dpi)
-            h_pt = pix.height * (72.0 / dpi)
-
-            # cria página e insere o JPEG ocupando toda a área
-            page_new = out.new_page(width=w_pt, height=h_pt)
-            img_stream = pix.tobytes("jpeg", quality=jpeg_quality)
-            page_new.insert_image(fitz.Rect(0, 0, w_pt, h_pt), stream=img_stream)
-
-            if diagnostic:
-                rows.append({
-                    "src_page": i+1, "quad": qi,
-                    "bb_w": round(bb.width,1), "bb_h": round(bb.height,1),
-                    "pix_w": pix.width, "pix_h": pix.height, "dpi": dpi
-                })
-
-    buf = io.BytesIO()
-    out.save(buf, garbage=4, deflate=True)
-    out.close()
-    buf.seek(0)
-    return buf.getvalue(), pd.DataFrame(rows)
-
-
-# ---------------- Modo: ETIQUETA + LISTA (10×15) ----------------
 def process_empacotamento(pdf_bytes: bytes, diagnostic=False):
     H_PAD = 0.0; V_PAD = 0.0
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -331,7 +263,6 @@ def process_empacotamento(pdf_bytes: bytes, diagnostic=False):
                 fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, R.y1)]
         for ci, col in enumerate(cols, start=1):
             blocks = pg.get_text("blocks", clip=col)
-            # achar topo do checklist
             checklist_top=None
             for b in blocks:
                 if "CHECKLIST" in norm_heavy(str(b[4])).upper():
@@ -341,7 +272,7 @@ def process_empacotamento(pdf_bytes: bytes, diagnostic=False):
                     if "ID PEDIDO" in norm_heavy(str(b[4])).upper():
                         checklist_top=b[1]; break
             if checklist_top is None: checklist_top = col.y0 + col.height*0.62
-            # header tabela
+
             table_head_y=None
             for b in blocks:
                 if b[1] >= checklist_top - 2:
@@ -395,7 +326,121 @@ def process_empacotamento(pdf_bytes: bytes, diagnostic=False):
     out_doc.save(buf, garbage=4, deflate=True); out_doc.close(); buf.seek(0)
     return buf.getvalue(), pd.DataFrame(diag_rows)
 
-# ---------------- RUN ----------------
+# ====================== APENAS ETIQUETA – AUTO LAYOUT ===================
+def _page_mask_coverage(page: fitz.Page, clip: fitz.Rect, dpi: int = 96,
+                        white: int = 245) -> float:
+    scale = dpi / 72.0
+    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
+    if pix.width == 0 or pix.height == 0:
+        return 1.0
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+    gray = img.convert("L")
+    arr = gray.histogram()
+    white_px = sum(arr[white:256])
+    total_px = sum(arr)
+    return white_px / max(total_px, 1)
+
+def _detect_cells_by_autolayout(doc: fitz.Document, page_idx: int,
+                                candidates=((1,1),(1,2),(2,1),(2,2)),
+                                dpi_mask=96, white=245, blank_thr=0.995):
+    p = doc[page_idx]; R = p.rect
+    best = None
+    for rows, cols in candidates:
+        cells = []
+        cw = (R.x1 - R.x0) / cols
+        ch = (R.y1 - R.y0) / rows
+        coverages = []
+        nonblank = 0
+        for r in range(rows):
+            for c in range(cols):
+                cell = fitz.Rect(R.x0 + c*cw, R.y0 + r*ch, R.x0 + (c+1)*cw, R.y0 + (r+1)*ch)
+                cov_white = _page_mask_coverage(p, cell, dpi=dpi_mask, white=white)
+                coverages.append(1.0 - cov_white)
+                if cov_white < blank_thr:
+                    nonblank += 1
+                cells.append(cell)
+        score = (nonblank, round(sum(coverages), 3))
+        if (best is None) or (score > best[0]):
+            best = (score, (rows, cols), cells, coverages)
+    _, (rows, cols), cells, coverages = best
+    occupied = []
+    for cell in cells:
+        if _page_mask_coverage(doc[page_idx], cell, dpi=dpi_mask, white=white) < blank_thr:
+            occupied.append(cell)
+    return occupied, (rows, cols), coverages
+
+def _fit_rect_center(dst_w, dst_h, img_w, img_h):
+    """retorna (x0,y0,x1,y1) para encaixar a imagem mantendo proporção"""
+    if img_w == 0 or img_h == 0:
+        return (0,0,dst_w,dst_h)
+    scale = min(dst_w / img_w, dst_h / img_h)
+    w = img_w * scale; h = img_h * scale
+    x0 = (dst_w - w) / 2; y0 = (dst_h - h) / 2
+    return (x0, y0, x0 + w, y0 + h)
+
+def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False, dpi_render=200, jpeg_quality=85,
+                            force_10x15=False):
+    """
+    APENAS ETIQUETA — autodetecta 1x1 / 1x2 / 2x1 / 2x2.
+    Recorta por células → trim raster → renderiza em JPEG.
+    Se 'force_10x15' True, página final é 10x15 cm e a etiqueta é centralizada.
+    """
+    src = fitz.open(stream=pdf_bytes, filetype="pdf")
+    out = fitz.open()
+    diag_rows = []
+
+    MIN_RATIO = 0.18
+    MIN_ABS   = 24.0
+
+    for i in range(len(src)):
+        p = src[i]
+        occ_cells, layout, covs = _detect_cells_by_autolayout(src, i)
+
+        if not occ_cells:
+            occ_cells = [p.rect]
+
+        for idx, cell in enumerate(occ_cells, start=1):
+            bb = trim_bbox_by_raster(src, i, cell, dpi=220, white=245, cov=0.997, pad_pt=1.0)
+
+            if (bb.width  < max(cell.width  * MIN_RATIO, MIN_ABS)) or \
+               (bb.height < max(cell.height * MIN_RATIO, MIN_ABS)):
+                bb = cell
+
+            scale = dpi_render / 72.0
+            pix = p.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=bb, alpha=False)
+            if pix.width == 0 or pix.height == 0:
+                continue
+
+            w_pt_img = pix.width  * (72.0 / dpi_render)
+            h_pt_img = pix.height * (72.0 / dpi_render)
+
+            if force_10x15:
+                # cria página 10×15 e centraliza imagem mantendo proporção
+                page_new = out.new_page(width=TARGET_W_PT, height=TARGET_H_PT)
+                x0,y0,x1,y1 = _fit_rect_center(TARGET_W_PT, TARGET_H_PT, w_pt_img, h_pt_img)
+                img = pix.tobytes("jpeg", quality=jpeg_quality)
+                page_new.insert_image(fitz.Rect(x0,y0,x1,y1), stream=img)
+            else:
+                page_new = out.new_page(width=w_pt_img, height=h_pt_img)
+                img = pix.tobytes("jpeg", quality=jpeg_quality)
+                page_new.insert_image(fitz.Rect(0, 0, w_pt_img, h_pt_img), stream=img)
+
+            if diagnostic:
+                diag_rows.append({
+                    "page": i+1, "cell_idx": idx, "layout": f"{layout[0]}x{layout[1]}",
+                    "cell_w": round(cell.width,1), "cell_h": round(cell.height,1),
+                    "bb_w": round(bb.width,1), "bb_h": round(bb.height,1),
+                    "pix_w": pix.width, "pix_h": pix.height,
+                    "forced_10x15": force_10x15
+                })
+
+    buf = io.BytesIO()
+    out.save(buf, garbage=4, deflate=True)
+    out.close()
+    buf.seek(0)
+    return buf.getvalue(), pd.DataFrame(diag_rows)
+
+# ================================ RUN ================================
 if go:
     if not files:
         st.warning("Selecione pelo menos um PDF.")
@@ -406,8 +451,11 @@ if go:
                 try:
                     b = f.getvalue()
                     if mode == "Apenas etiqueta":
-                        data, df = process_apenas_etiqueta(b, diagnostic=diag)
-                        outname = Path(f.name).stem + "_apenas_etiqueta.pdf"
+                        data, df = process_apenas_etiqueta(
+                            b, diagnostic=diag, dpi_render=dpi_render, jpeg_quality=85,
+                            force_10x15=fixed_10x15
+                        )
+                        outname = Path(f.name).stem + ("_apenas_etiqueta_10x15.pdf" if fixed_10x15 else "_apenas_etiqueta.pdf")
                     else:
                         data, df = process_empacotamento(b, diagnostic=diag)
                         outname = Path(f.name).stem + "_empacotamento_10x15.pdf"

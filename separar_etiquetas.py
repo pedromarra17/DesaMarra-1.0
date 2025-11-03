@@ -103,26 +103,62 @@ def content_bbox(page: fitz.Page, clip: fitz.Rect, pad: float = 2.0) -> fitz.Rec
 def trim_bbox_by_raster(doc: fitz.Document, page_idx: int, rect: fitz.Rect,
                         dpi: int = 200, white: int = 245, cov: float = 0.995,
                         pad_pt: float = 1.5) -> fitz.Rect:
+    """
+    Faz crop fino por rasterização local para remover bordas totalmente brancas.
+    Retorna um fitz.Rect dentro de 'rect' com pequena margem (pad_pt).
+    """
     page = doc[page_idx]
-    if rect.width <= 0 or rect.height <= 0: return rect
+    if rect.width <= 0 or rect.height <= 0:
+        return rect
+
     scale = dpi / 72.0
     pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=rect, alpha=False)
-    if pix.width == 0 or pix.height == 0: return rect
+    if pix.width == 0 or pix.height == 0:
+        return rect
+
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-    g = img.convert("L"); w,h = g.size; px = g.load()
-    def row_is_white(y): return sum(1 for x in range(w) if px[x,y] >= white)/w >= cov
-    def col_is_white(x): return sum(1 for y in range(h) if px[x,y] >= white)/h >= cov
-    top=0;   while top < h and row_is_white(top):   top += 1
-    if top==h: return rect
-    bot=h-1; while bot>=0  and row_is_white(bot):   bot -= 1
-    left=0;  while left < w and col_is_white(left): left += 1
-    right=w-1;while right>=0 and col_is_white(right): right -= 1
+    g = img.convert("L")
+    w, h = g.size
+    px = g.load()
+
+    def row_is_white(y: int) -> bool:
+        return sum(1 for x in range(w) if px[x, y] >= white) / w >= cov
+
+    def col_is_white(x: int) -> bool:
+        return sum(1 for y in range(h) if px[x, y] >= white) / h >= cov
+
+    # varrer topo
+    top = 0
+    while top < h and row_is_white(top):
+        top += 1
+    if top == h:
+        return rect
+
+    # varrer base
+    bottom = h - 1
+    while bottom >= 0 and row_is_white(bottom):
+        bottom -= 1
+
+    # varrer esquerda
+    left = 0
+    while left < w and col_is_white(left):
+        left += 1
+
+    # varrer direita
+    right = w - 1
+    while right >= 0 and col_is_white(right):
+        right -= 1
+
+    # converter pixels -> pontos
     px2pt = lambda v: (v / dpi) * 72.0
-    new = fitz.Rect(rect.x0 + px2pt(left)  - pad_pt,
-                    rect.y0 + px2pt(top)   - pad_pt,
-                    rect.x0 + px2pt(right+1) + pad_pt,
-                    rect.y0 + px2pt(bot+1)   + pad_pt)
-    return new & rect
+    new_rect = fitz.Rect(
+        rect.x0 + px2pt(left) - pad_pt,
+        rect.y0 + px2pt(top) - pad_pt,
+        rect.x0 + px2pt(right + 1) + pad_pt,
+        rect.y0 + px2pt(bottom + 1) + pad_pt,
+    )
+    return new_rect & rect
+
 
 def tighten_right_edge(page: fitz.Page, doc: fitz.Document, page_idx: int,
                        rect: fitz.Rect, pad_pt: float = 2.0) -> fitz.Rect:

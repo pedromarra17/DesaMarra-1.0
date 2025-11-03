@@ -333,162 +333,108 @@ def process_mode_4up(pdf_bytes: bytes, diagnostic=False):
     def quads_fitz(rect: fitz.Rect):
         W,H = rect.width, rect.height
         return [
-            fitz.Rect(rect.x0,       rect.y0,       rect.x0+W/2, rect.y0+H/2),
-            fitz.Rect(rect.x0+W/2,   rect.y0,       rect.x1,     rect.y0+H/2),
-            fitz.Rect(rect.x0,       rect.y0+H/2,   rect.x0+W/2, rect.y1    ),
-            fitz.Rect(rect.x0+W/2,   rect.y0+H/2,   rect.x1,     rect.y1    ),
+            fitz.Rect(rect.x0,       rect.y0,       rect.x0+W/2, rect.y0+H/2),  # TL
+            fitz.Rect(rect.x0+W/2,   rect.y0,       rect.x1,     rect.y0+H/2),  # TR
+            fitz.Rect(rect.x0,       rect.y0+H/2,   rect.x0+W/2, rect.y1    ),  # BL
+            fitz.Rect(rect.x0+W/2,   rect.y0+H/2,   rect.x1,     rect.y1    ),  # BR
         ]
+
     def quads_pdf(mb):
         l,b,r,t = float(mb.left), float(mb.bottom), float(mb.right), float(mb.top)
         w,h = r-l, t-b
         return [(l,b+h/2,l+w/2,t),(l+w/2,b+h/2,r,t),(l,b,l+w/2,b+h/2),(l+w/2,b,r,b+h/2)]
 
-    label_quads=[]; list_quads=[]; diag_rows=[]
-    for i in range(len(doc)):
-        pf=doc[i]; qf=quads_fitz(pf.rect); qp=quads_pdf(reader.pages[i].mediabox)
-        for qidx,(rf,bp) in enumerate(zip(qf,qp)):
-            txt = pf.get_text("text", clip=rf) or ""
-            # tenta lista
-            prods = extract_items_QNTxSKU(pf, rf)
-            if prods:
-                list_quads.append(dict(page_idx=i, pypdf_box=bp, fitz_rect=rf, text=txt, items=prods))
-                typ="list"
-            else:
-                if REMOVE_BLANK and quad_is_blank_by_raster(doc,i,rf): continue
-                label_quads.append(dict(page_idx=i, pypdf_box=bp, fitz_rect=rf, text=txt))
-                typ="label"
-            if diagnostic:
-                pedido = extract_order(txt) or ""
-                diag_rows.append({"page":i+1,"quad":qidx+1,"tipo":typ,"pedido":pedido,"amostra":norm_heavy(txt)[:120]})
+    writer = PdfWriter()
 
-    # se nada classificar como etiqueta, apenas 4→1
-    if not label_quads:
-        w=PdfWriter()
-        for i in range(len(reader.pages)):
-            page=reader.pages[i]
-            for (x0,y0,x1,y1) in quads_pdf(page.mediabox):
-                if REMOVE_BLANK and quad_is_blank_by_raster(doc,i,fitz.Rect(x0,y0,x1,y1)): continue
-                p=deepcopy(page); rect=RectangleObject([x0,y0,x1,y1]); p.cropbox=rect; p.mediabox=rect; w.add_page(p)
-        out=io.BytesIO(); w.write(out); out.seek(0)
-        return out.getvalue(), pd.DataFrame(diag_rows)
+    for i in range(len(reader.pages)):
+        page      = reader.pages[i]
+        rects_pdf = quads_pdf(page.mediabox)
+        rects_fit = quads_fitz(doc[i].rect)
 
-    # recorte todas as etiquetas
-    w=PdfWriter()
-    for q in label_quads:
-        page=reader.pages[q["page_idx"]]
-        x0,y0,x1,y1=q["pypdf_box"]; p=deepcopy(page); rect=RectangleObject([x0,y0,x1,y1])
-        p.cropbox=rect; p.mediabox=rect; w.add_page(p)
-    tmp=io.BytesIO(); w.write(tmp); tmp.seek(0)
-    cropped=fitz.open(stream=tmp.getvalue(), filetype="pdf")
+        for (x0,y0,x1,y1), clip in zip(rects_pdf, rects_fit):
+            # pula quadrantes totalmente brancos
+            if REMOVE_BLANK and quad_is_blank_by_raster(doc, i, clip):
+                continue
+            p = deepcopy(page)
+            rect = RectangleObject([x0, y0, x1, y1])
+            p.cropbox = rect
+            p.mediabox = rect
+            writer.add_page(p)
 
-    # listas por pedido e por ordem
-    lists_by_order={}; lists_in_order=[]
-    for lst in list_quads:
-        oid=extract_order(lst["text"])
-        if oid: lists_by_order[oid]=lst["items"]
-        else:   lists_in_order.append(lst["items"])
+    out = io.BytesIO()
+    writer.write(out)
+    out.seek(0)
+    # sem diagnóstico especial aqui
+    return out.getvalue(), pd.DataFrame()
 
-    final_doc=fitz.open(); used=set(); idx_free=0
-    for i,q in enumerate(label_quads):
-        src=cropped[i]; r=src.rect; order=extract_order(q["text"])
-        if order and order in lists_by_order and order not in used:
-            items=lists_by_order[order][:MAX_LINES]; used.add(order)
-        else:
-            items=lists_in_order[idx_free][:MAX_LINES] if idx_free<len(lists_in_order) else []
-            if idx_free<len(lists_in_order): idx_free+=1
-
-        lines_count = 1 + max(1,len(items))
-        min_area = PAD_Y_PT*2 + (FONT_SIZE+2)*lines_count
-        extra_h = max(r.height*OVERLAY_HEIGHT_PCT, min_area)
-
-        pg = final_doc.new_page(width=r.width, height=r.height+extra_h)
-        pg.show_pdf_page(fitz.Rect(0,0,r.width,r.height), cropped, i)
-        box=fitz.Rect(MARGIN_X_PT, r.height+PAD_Y_PT, r.width-MARGIN_X_PT, r.height+extra_h-PAD_Y_PT)
-        text="Lista de separação:\n"+("\n".join(items) if items else "- (não encontrado)")
-        pg.insert_textbox(box, text, fontname="helv", fontsize=FONT_SIZE, align=0)
-
-    out=io.BytesIO(); final_doc.save(out); final_doc.close(); out.seek(0)
-    return out.getvalue(), pd.DataFrame(diag_rows)
 
 # ==================== MODO 2: lista de empacotamento ====================
 def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
     """
-    PDF com 2 etiquetas por página; abaixo de cada etiqueta vem 'Checklist de carregamento'.
-    Saída: 1 página por etiqueta, com a lista QNT×SKU no rodapé (sem cabeçalhos).
+    PDF com 2 colunas (etiqueta em cima + checklist embaixo).
+    Agora: recorte **apenas da etiqueta** usando PyMuPDF com clip, sem rodapé.
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-
     final_doc = fitz.open()
-    diag_rows=[]
+    diag_rows = []
 
     for pi in range(len(doc)):
-        pg = doc[pi]; R = pg.rect
-        # divide a página em duas colunas iguais
+        pg = doc[pi]
+        R  = pg.rect
+
+        # duas colunas
         left  = fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, R.y1)
         right = fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, R.y1)
+
         for ci, col in enumerate([left, right], start=1):
-            # localizar o topo do 'Checklist de carregamento' dentro da coluna (robusto p/ 7 ou 8 campos)
-            txt_col = pg.get_text("blocks", clip=col)
+            blocks = pg.get_text("blocks", clip=col)
+
             checklist_top = None
-            for b in txt_col:
-                x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+            # robusto para 7 ou 8 campos no tuple
+            for b in blocks:
+                x0,y0,x1,y1 = b[0], b[1], b[2], b[3]
                 txt = b[4] if len(b) >= 5 else ""
                 if "CHECKLIST" in norm_heavy(str(txt)).upper():
                     checklist_top = y0
                     break
             if checklist_top is None:
-                # fallback: procura também por 'ID Pedido' como pista de início da lista
-                for b in txt_col:
-                    x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+                # segunda pista: "ID Pedido"
+                for b in blocks:
+                    x0,y0,x1,y1 = b[0], b[1], b[2], b[3]
                     txt = b[4] if len(b) >= 5 else ""
                     if "ID PEDIDO" in norm_heavy(str(txt)).upper():
                         checklist_top = y0
                         break
             if checklist_top is None:
-                # fallback final: usa 62% da coluna como quebra etiqueta/lista
-                checklist_top = col.y0 + (col.height * 0.62)
+                # fallback
+                checklist_top = col.y0 + col.height * 0.62
 
-            # etiqueta = da borda superior até um pouco acima do checklist
-            label_rect = fitz.Rect(col.x0, col.y0, col.x1, checklist_top-6)
+            # etiqueta = topo da coluna até logo antes do checklist
+            label_rect = fitz.Rect(col.x0, col.y0, col.x1, checklist_top - 4)
 
-            # região da lista (somente itens, sem cabeçalhos extras)
-            list_rect  = fitz.Rect(col.x0, checklist_top+10, col.x1, col.y1-10)
-
-            # extrai itens
-            items = extract_items_QNTxSKU(pg, list_rect)
-
-            # pular colunas totalmente em branco
-            if REMOVE_BLANK and quad_is_blank_by_raster(doc, pi, label_rect) and not items:
+            # pula colunas totalmente brancas
+            if REMOVE_BLANK and quad_is_blank_by_raster(doc, pi, label_rect):
                 continue
 
-            # recorta a etiqueta preservando vetor com pypdf
-            psrc = reader.pages[pi]
-            x0,y0,x1,y1 = label_rect.x0, label_rect.y0, label_rect.x1, label_rect.y1
-            p = deepcopy(psrc)
-            rect = RectangleObject([x0, y0, x1, y1])
-            p.cropbox = rect; p.mediabox = rect
-            temp_w = PdfWriter(); temp_w.add_page(p)
-            buf = io.BytesIO(); temp_w.write(buf); buf.seek(0)
-            cropped = fitz.open(stream=buf.getvalue(), filetype="pdf")
-            cr = cropped[0].rect
-
-            # calcula rodapé
-            lines_count = 1 + max(1, len(items))
-            min_area    = PAD_Y_PT*2 + (FONT_SIZE+2)*lines_count
-            extra_h     = max(cr.height*OVERLAY_HEIGHT_PCT, min_area)
-
-            new_pg = final_doc.new_page(width=cr.width, height=cr.height+extra_h)
-            new_pg.show_pdf_page(fitz.Rect(0,0,cr.width,cr.height), cropped, 0)
-            box = fitz.Rect(MARGIN_X_PT, cr.height+PAD_Y_PT, cr.width-MARGIN_X_PT, cr.height+extra_h-PAD_Y_PT)
-            text = "Itens (QNT × SKU):\n" + ("\n".join(items) if items else "- (não encontrado)")
-            new_pg.insert_textbox(box, text, fontname="helv", fontsize=FONT_SIZE, align=0)
+            # cria página do tamanho exato da etiqueta e desenha usando clip
+            new_pg = final_doc.new_page(width=label_rect.width, height=label_rect.height)
+            new_pg.show_pdf_page(
+                fitz.Rect(0, 0, label_rect.width, label_rect.height),
+                doc, pi, clip=label_rect
+            )
 
             if diagnostic:
-                amostra = norm_heavy(pg.get_text("text", clip=list_rect))[:120]
-                diag_rows.append({"page":pi+1,"col":ci,"itens_detectados":len(items),"amostra":amostra})
+                diag_rows.append({
+                    "page": pi+1, "col": ci,
+                    "label_top": round(label_rect.y0,1),
+                    "label_bottom": round(label_rect.y1,1),
+                    "checklist_top": round(checklist_top,1)
+                })
 
-    out=io.BytesIO(); final_doc.save(out); final_doc.close(); out.seek(0)
+    out = io.BytesIO()
+    final_doc.save(out)
+    final_doc.close()
+    out.seek(0)
     return out.getvalue(), pd.DataFrame(diag_rows)
 
 

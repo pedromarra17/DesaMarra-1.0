@@ -372,63 +372,106 @@ def process_mode_4up(pdf_bytes: bytes, diagnostic=False):
 def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
     """
     PDF com 2 colunas (etiqueta em cima + checklist embaixo).
-    Agora: recorte **apenas da etiqueta** usando PyMuPDF com clip, sem rodapé.
+    Saída final: 1 página por etiqueta contendo:
+      [ETIQUETA COMPLETA] + [TABELA do checklist a partir de '#/PRODUTO/SKU/VARIAÇÃO/QUANTIDADE']
     """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     final_doc = fitz.open()
     diag_rows = []
 
+    def find_blocks(page, clip):
+        # get_text("blocks") pode retornar 7 ou 8 itens por tupla; normalizamos
+        out = []
+        for b in page.get_text("blocks", clip=clip):
+            x0, y0, x1, y1 = b[0], b[1], b[2], b[3]
+            txt = b[4] if len(b) >= 5 else ""
+            out.append((x0, y0, x1, y1, str(txt)))
+        return out
+
     for pi in range(len(doc)):
         pg = doc[pi]
         R  = pg.rect
-
-        # duas colunas
+        # Divide página em duas colunas iguais
         left  = fitz.Rect(R.x0, R.y0, (R.x0+R.x1)/2, R.y1)
         right = fitz.Rect((R.x0+R.x1)/2, R.y0, R.x1, R.y1)
 
         for ci, col in enumerate([left, right], start=1):
-            blocks = pg.get_text("blocks", clip=col)
+            blocks = find_blocks(pg, col)
 
+            # 1) Detecta o topo do bloco "Checklist de carregamento"
             checklist_top = None
-            # robusto para 7 ou 8 campos no tuple
-            for b in blocks:
-                x0,y0,x1,y1 = b[0], b[1], b[2], b[3]
-                txt = b[4] if len(b) >= 5 else ""
-                if "CHECKLIST" in norm_heavy(str(txt)).upper():
+            for x0, y0, x1, y1, txt in blocks:
+                if "CHECKLIST" in norm_heavy(txt).upper():
                     checklist_top = y0
                     break
+            # fallback se não achar "CHECKLIST"
             if checklist_top is None:
-                # segunda pista: "ID Pedido"
-                for b in blocks:
-                    x0,y0,x1,y1 = b[0], b[1], b[2], b[3]
-                    txt = b[4] if len(b) >= 5 else ""
-                    if "ID PEDIDO" in norm_heavy(str(txt)).upper():
+                for x0, y0, x1, y1, txt in blocks:
+                    if "ID PEDIDO" in norm_heavy(txt).upper():
                         checklist_top = y0
                         break
             if checklist_top is None:
-                # fallback
-                checklist_top = col.y0 + col.height * 0.62
+                checklist_top = col.y0 + col.height * 0.62  # heurística
 
-            # etiqueta = topo da coluna até logo antes do checklist
-            label_rect = fitz.Rect(col.x0, col.y0, col.x1, checklist_top - 4)
+            # 2) Acha o cabeçalho da TABELA (linha que contém 'SKU' e 'QUANTIDADE')
+            table_head_y = None
+            for x0, y0, x1, y1, txt in blocks:
+                if y0 >= checklist_top - 2:  # só abaixo do título
+                    up = norm_heavy(txt).upper()
+                    if ("SKU" in up) and (("QUANTIDADE" in up) or (up.endswith("QUANTIDADE"))):
+                        table_head_y = y0
+                        break
+            if table_head_y is None:
+                # fallback suave: um pouco abaixo do título
+                table_head_y = checklist_top + 28
 
-            # pula colunas totalmente brancas
+            # 3) Define as áreas de recorte
+            #    - etiqueta: do topo da coluna até antes do título do checklist
+            label_rect = fitz.Rect(col.x0, col.y0, col.x1, max(col.y0 + 20, checklist_top - 4))
+            #    - lista: da linha do cabeçalho da tabela até o rodapé da coluna
+            list_rect  = fitz.Rect(col.x0, table_head_y - 1, col.x1, col.y1 - 6)
+
+            # pula colunas totalmente brancas (etiqueta)
             if REMOVE_BLANK and quad_is_blank_by_raster(doc, pi, label_rect):
+                # se a etiqueta está vazia, não faz sentido renderizar a lista sozinha
                 continue
 
-            # cria página do tamanho exato da etiqueta e desenha usando clip
-            new_pg = final_doc.new_page(width=label_rect.width, height=label_rect.height)
+            # 4) Calcula a altura final (empilhar etiqueta + lista)
+            #     Vamos clipar os dois trechos separadamente e empilhar na nova página
+            #     Para saber alturas, renderizamos caixas "virtuais" (apenas as rects)
+            label_h = label_rect.height
+            list_h  = max(0, list_rect.height)
+
+            # Se a lista estiver praticamente vazia (detecção por raster), não a renderizamos
+            if quad_is_blank_by_raster(doc, pi, list_rect):
+                list_h = 0
+
+            new_w = label_rect.width
+            new_h = label_h + list_h
+            new_pg = final_doc.new_page(width=new_w, height=new_h)
+
+            # 5) Desenha etiqueta (topo)
             new_pg.show_pdf_page(
-                fitz.Rect(0, 0, label_rect.width, label_rect.height),
+                fitz.Rect(0, 0, new_w, label_h),
                 doc, pi, clip=label_rect
             )
+
+            # 6) Desenha tabela (logo abaixo), se houver
+            if list_h > 0:
+                new_pg.show_pdf_page(
+                    fitz.Rect(0, label_h, new_w, label_h + list_h),
+                    doc, pi, clip=list_rect
+                )
 
             if diagnostic:
                 diag_rows.append({
                     "page": pi+1, "col": ci,
                     "label_top": round(label_rect.y0,1),
                     "label_bottom": round(label_rect.y1,1),
-                    "checklist_top": round(checklist_top,1)
+                    "checklist_top": round(checklist_top,1),
+                    "table_head_y": round(table_head_y,1),
+                    "list_bottom": round(list_rect.y1,1),
+                    "render_list": list_h > 0
                 })
 
     out = io.BytesIO()
@@ -436,6 +479,7 @@ def process_mode_packing(pdf_bytes: bytes, diagnostic=False):
     final_doc.close()
     out.seek(0)
     return out.getvalue(), pd.DataFrame(diag_rows)
+
 
 
 # =============================== RUN ===============================

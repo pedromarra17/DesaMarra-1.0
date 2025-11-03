@@ -257,14 +257,17 @@ def draw_list_vector(page_out: fitz.Page, x, y, width, max_height, rows,
 # ---------------- Modo: APENAS ETIQUETA (4→1 robusto com PyMuPDF) ----------------
 def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False):
     """
-    Para páginas com 4 etiquetas por folha:
-      - Divide em 4 quadrantes via PyMuPDF (respeita rotação/mediabox)
-      - Trim de brancos em cada etiqueta
-      - Cada etiqueta sai em UMA página (tamanho original da etiqueta)
+    Divide páginas 4-up em 4 etiquetas individuais, fazendo
+    apenas trim por raster no quadrante (robusto p/ casos sem texto).
+    Evita 'coluna vertical' com salvaguardas de largura/altura mínimas.
     """
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     out = fitz.open()
     rows = []
+
+    MIN_RATIO = 0.20      # bb tem que ter pelo menos 20% da largura/altura do quadrante
+    MIN_ABS   = 30.0      # e pelo menos 30 pt (~10 mm) de lado
+
     for i in range(len(src)):
         p = src[i]; R = p.rect
         quads = [
@@ -273,22 +276,38 @@ def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False):
             fitz.Rect(R.x0, (R.y0+R.y1)/2, (R.x0+R.x1)/2, R.y1),
             fitz.Rect((R.x0+R.x1)/2, (R.y0+R.y1)/2, R.x1, R.y1),
         ]
+
         for qi, q in enumerate(quads, start=1):
-            # “Safeguard” para páginas em branco ou áreas vazias
-            bb = content_bbox(p, q, pad=2.0)
-            bb = trim_bbox_by_raster(src, i, bb, dpi=220, white=245, cov=0.997, pad_pt=1.0)
-            if bb.width < 5 or bb.height < 5:  # muito pequeno = vazio
+            # 1) se o quadrante for "branco", pula
+            if quad_is_blank_by_raster(src, i, q):
                 continue
-            if REMOVE_BLANK and quad_is_blank_by_raster(src, i, bb):
-                continue
-            # nova página do tamanho da etiqueta recortada
+
+            # 2) trim apenas por raster (robusto p/ páginas sem texto)
+            bb = trim_bbox_by_raster(src, i, q, dpi=220, white=245, cov=0.997, pad_pt=1.0)
+
+            # 3) salvaguardas contra BB muito estreito/baixo
+            if bb.width  < max(q.width  * MIN_RATIO, MIN_ABS) or \
+               bb.height < max(q.height * MIN_RATIO, MIN_ABS):
+                # fallback: use o quadrante original (sem trim)
+                bb = q
+
+            # 4) cria página do tamanho do recorte e coloca a etiqueta
             newp = out.new_page(width=bb.width, height=bb.height)
-            newp.show_pdf_page(fitz.Rect(0,0,bb.width,bb.height), src, i, clip=bb)
-            if diagnostic: rows.append({"src_page": i+1, "quad": qi, "w": round(bb.width,1), "h": round(bb.height,1)})
+            newp.show_pdf_page(fitz.Rect(0, 0, bb.width, bb.height), src, i, clip=bb)
+
+            if diagnostic:
+                rows.append({
+                    "src_page": i+1, "quad": qi,
+                    "q_w": round(q.width,1), "q_h": round(q.height,1),
+                    "bb_w": round(bb.width,1), "bb_h": round(bb.height,1)
+                })
 
     buf = io.BytesIO()
-    out.save(buf, garbage=4, deflate=True); out.close(); buf.seek(0)
+    out.save(buf, garbage=4, deflate=True)
+    out.close()
+    buf.seek(0)
     return buf.getvalue(), pd.DataFrame(rows)
+
 
 # ---------------- Modo: ETIQUETA + LISTA (10×15) ----------------
 def process_empacotamento(pdf_bytes: bytes, diagnostic=False):

@@ -1,5 +1,5 @@
 # separar_etiquetas.py
-# pip install streamlit pypdf PyMuPDF pillow pandas
+# pip install streamlit PyMuPDF pillow pandas
 
 import streamlit as st
 from pathlib import Path
@@ -35,17 +35,19 @@ def show_logo_center(px=420):
 show_logo_center()
 st.markdown("<h1 style='text-align:center;margin:.4rem 0 0'>Etiquetas Shopee</h1>", unsafe_allow_html=True)
 
-col_header = st.columns([1,1,1,2.2])
-with col_header[0]:
-    mode = st.radio("Tipo de PDF:", ["Apenas etiqueta", "Etiqueta com lista de empacotamento"], horizontal=False)
-with col_header[1]:
+# -------------------- Top controls --------------------
+cols = st.columns([1,1,1,2.2])
+with cols[0]:
+    mode = st.radio("Tipo de PDF:", ["Apenas etiqueta", "Etiqueta com lista de empacotamento"])
+with cols[1]:
     diag = st.toggle("Modo diagnóstico", value=False, help="Mostra CSV com informações técnicas.")
-with col_header[2]:
-    dpi_render = st.slider("DPI (raster)", min_value=120, max_value=300, value=200, step=10, help="DPI p/ render (Apenas etiqueta).")
-with col_header[3]:
+with cols[2]:
+    dpi_render = st.slider("DPI (raster)", 120, 300, 200, 10, help="Apenas etiqueta: nitidez x tamanho do arquivo.")
+with cols[3]:
     fixed_10x15 = False
     if mode == "Apenas etiqueta":
-        fixed_10x15 = st.toggle("Fixar saída em 10×15 cm", value=False, help="Encaixa cada etiqueta em uma página 10×15 cm mantendo proporção.")
+        fixed_10x15 = st.toggle("Fixar saída em 10×15 cm", value=False,
+                                help="Encaixa cada etiqueta em uma página 10×15 cm mantendo proporção.")
 
 st.divider()
 files = st.file_uploader("Selecione PDF(s) da Shopee", type=["pdf"], accept_multiple_files=True)
@@ -63,17 +65,15 @@ def mm_to_pt(mm): return PT_PER_IN * (mm / MM_PER_IN)
 TARGET_W_PT = mm_to_pt(100)  # 10 cm
 TARGET_H_PT = mm_to_pt(150)  # 15 cm
 
-FONT_NAME   = "helv"         # Helvetica embutida (nome interno do PDF)
+FONT_NAME   = "helv"         # Helvetica embutida
 LATIN = r"A-Za-zÀ-ÖØ-öø-ÿ"
 
 def normalize_txt(t: str) -> str:
-    import unicodedata, re
     t = unicodedata.normalize("NFKD", t)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", t).strip()
 
 def collapse_pairs(s: str) -> str:
-    import re
     toks, out, buf = s.split(), [], []
     for t in toks:
         if re.fullmatch(rf"[{LATIN}]{{1,2}}", t): buf.append(t)
@@ -84,10 +84,19 @@ def collapse_pairs(s: str) -> str:
     return " ".join(out)
 
 def norm_heavy(t: str) -> str:
-    import re
     t = normalize_txt(t)
     t = collapse_pairs(t)
     return re.sub(r"(?:(?<=\b)[A-Za-z]\s(?=[A-Za-z]))+", lambda m: m.group(0).replace(" ",""), t)
+
+def pixmap_to_jpeg_bytes(pix: fitz.Pixmap, quality: int = 85) -> bytes:
+    """Converte um fitz.Pixmap em JPEG usando Pillow (para versões do PyMuPDF sem .tobytes('jpeg', quality=...))."""
+    mode = "RGBA" if pix.alpha else "RGB"
+    img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
+    if mode == "RGBA":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    return buf.getvalue()
 
 def quad_is_blank_by_raster(doc: fitz.Document, page_idx: int, clip: fitz.Rect,
                             dpi=DPI_CHECK, white=WHITE_THR, cov=COVERAGE) -> bool:
@@ -370,7 +379,6 @@ def _detect_cells_by_autolayout(doc: fitz.Document, page_idx: int,
     return occupied, (rows, cols), coverages
 
 def _fit_rect_center(dst_w, dst_h, img_w, img_h):
-    """retorna (x0,y0,x1,y1) para encaixar a imagem mantendo proporção"""
     if img_w == 0 or img_h == 0:
         return (0,0,dst_w,dst_h)
     scale = min(dst_w / img_w, dst_h / img_h)
@@ -382,8 +390,8 @@ def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False, dpi_render=200, 
                             force_10x15=False):
     """
     APENAS ETIQUETA — autodetecta 1x1 / 1x2 / 2x1 / 2x2.
-    Recorta por células → trim raster → renderiza em JPEG.
-    Se 'force_10x15' True, página final é 10x15 cm e a etiqueta é centralizada.
+    Recorta por células → trim raster → renderiza em JPEG (via Pillow).
+    Se 'force_10x15' True, a página final é 10×15 cm e a etiqueta é centralizada.
     """
     src = fitz.open(stream=pdf_bytes, filetype="pdf")
     out = fitz.open()
@@ -414,16 +422,15 @@ def process_apenas_etiqueta(pdf_bytes: bytes, diagnostic=False, dpi_render=200, 
             w_pt_img = pix.width  * (72.0 / dpi_render)
             h_pt_img = pix.height * (72.0 / dpi_render)
 
+            img_stream = pixmap_to_jpeg_bytes(pix, jpeg_quality)
+
             if force_10x15:
-                # cria página 10×15 e centraliza imagem mantendo proporção
                 page_new = out.new_page(width=TARGET_W_PT, height=TARGET_H_PT)
                 x0,y0,x1,y1 = _fit_rect_center(TARGET_W_PT, TARGET_H_PT, w_pt_img, h_pt_img)
-                img = pix.tobytes("jpeg", quality=jpeg_quality)
-                page_new.insert_image(fitz.Rect(x0,y0,x1,y1), stream=img)
+                page_new.insert_image(fitz.Rect(x0,y0,x1,y1), stream=img_stream)
             else:
                 page_new = out.new_page(width=w_pt_img, height=h_pt_img)
-                img = pix.tobytes("jpeg", quality=jpeg_quality)
-                page_new.insert_image(fitz.Rect(0, 0, w_pt_img, h_pt_img), stream=img)
+                page_new.insert_image(fitz.Rect(0, 0, w_pt_img, h_pt_img), stream=img_stream)
 
             if diagnostic:
                 diag_rows.append({
